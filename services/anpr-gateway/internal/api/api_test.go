@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/icofcucam/naditos/packages/go-common/connectors"
 	"github.com/icofcucam/naditos/packages/go-common/contracts"
 	"github.com/icofcucam/naditos/packages/go-common/contracts/anpr"
 	"github.com/icofcucam/naditos/packages/go-common/testkit"
@@ -51,7 +52,8 @@ func (s *stubRecognizer) Recognize(_ context.Context, img anpr.Image, opts anpr.
 }
 
 func build(env *testkit.Env, rec anpr.Recognizer) http.Handler {
-	return api.New(env.Cfg, discardLogger(), env.Pool, env.Issuer, rec)
+	hm := connectors.NewHealthMonitor(env.AdminPool())
+	return api.New(env.Cfg, discardLogger(), env.Pool, env.Issuer, rec, hm)
 }
 
 // imageRequest builds a multipart/form-data POST against /v1/anpr/recognize.
@@ -215,5 +217,81 @@ func TestHealth(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"provider":"stub"`) {
 		t.Fatalf("body: %s", w.Body.String())
+	}
+}
+
+// TestHealth_StreakBumpedOnFailure: provider errors increment the
+// fail_streak via connectors.HealthMonitor; subsequent /health calls
+// reflect the streak so the admin /providers tile shows degraded /
+// down state without per-module bespoke wiring.
+func TestHealth_StreakBumpedOnFailure(t *testing.T) {
+	env := testkit.Setup(t)
+	rec := &stubRecognizer{err: errors.New("upstream down")}
+	tok, _ := env.Token("officer", "anpr:scan")
+	h := build(env, rec)
+
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, imageRequest(t, env, tok, []byte("x"), nil))
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("attempt %d: want 502, got %d", i, w.Code)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v1/anpr/health", nil)
+	r.Header.Set("X-Tenant-Id", env.Tenant)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	h.ServeHTTP(w, r)
+	body := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("health: %d %s", w.Code, body)
+	}
+	if !strings.Contains(body, `"state":"degraded"`) {
+		t.Fatalf("want state=degraded, got %s", body)
+	}
+	if !strings.Contains(body, `"fail_streak":3`) {
+		t.Fatalf("want streak=3, got %s", body)
+	}
+}
+
+// TestHealth_StreakResetsOnSuccess: a single successful recognize
+// after failures clears the streak and flips state back to ok.
+func TestHealth_StreakResetsOnSuccess(t *testing.T) {
+	env := testkit.Setup(t)
+	rec := &stubRecognizer{err: errors.New("flaky upstream")}
+	tok, _ := env.Token("officer", "anpr:scan")
+	h := build(env, rec)
+
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, imageRequest(t, env, tok, []byte("x"), nil))
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("attempt %d: want 502, got %d", i, w.Code)
+		}
+	}
+
+	rec.mu.Lock()
+	rec.err = nil
+	rec.reads = []anpr.Read{{Plate: "OK1", Confidence: 0.9}}
+	rec.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, imageRequest(t, env, tok, []byte("x"), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("recovered call: want 200, got %d", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v1/anpr/health", nil)
+	r.Header.Set("X-Tenant-Id", env.Tenant)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	h.ServeHTTP(w, r)
+	body := w.Body.String()
+	if !strings.Contains(body, `"state":"ok"`) {
+		t.Fatalf("want state=ok after recovery, got %s", body)
+	}
+	if !strings.Contains(body, `"fail_streak":0`) {
+		t.Fatalf("want streak=0 after recovery, got %s", body)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
+	"github.com/icofcucam/naditos/packages/go-common/connectors"
 	"github.com/icofcucam/naditos/packages/go-common/contracts/anpr"
 	"github.com/icofcucam/naditos/packages/go-common/db"
 	"github.com/icofcucam/naditos/packages/go-common/events"
@@ -54,7 +55,11 @@ func main() {
 		recognizer := anpr.NewFromEnv(log)
 		log.Info("anpr provider wired",
 			"provider", recognizer.Info().Provider)
-		h := api.New(cfg, log, pool, issuer, recognizer)
+		// Same fail-streak tracking insurance and inspection use, so
+		// the /providers admin page can show a unified state across
+		// every external integration.
+		health := connectors.NewHealthMonitor(pool)
+		h := api.New(cfg, log, pool, issuer, recognizer, health)
 		if err := server.Run(ctx, log, "anpr-gateway", cfg.Port, h); err != nil {
 			log.Error("server exited", "err", err)
 		}

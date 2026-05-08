@@ -16,6 +16,7 @@ import (
 
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
+	"github.com/icofcucam/naditos/packages/go-common/connectors"
 	"github.com/icofcucam/naditos/packages/go-common/contracts/anpr"
 	"github.com/icofcucam/naditos/packages/go-common/db"
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
@@ -27,11 +28,14 @@ type API struct {
 	pool       *pgxpool.Pool
 	issuer     *auth.Issuer
 	recognizer anpr.Recognizer
+	hm         *connectors.HealthMonitor
 }
 
 func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
-	issuer *auth.Issuer, recognizer anpr.Recognizer) http.Handler {
-	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, recognizer: recognizer}
+	issuer *auth.Issuer, recognizer anpr.Recognizer,
+	health *connectors.HealthMonitor) http.Handler {
+	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer,
+		recognizer: recognizer, hm: health}
 	mux := http.NewServeMux()
 
 	// Single-scan ingest. Officer devices and edge cameras hit this in
@@ -289,13 +293,22 @@ func (a *API) recognize(w http.ResponseWriter, r *http.Request) {
 	reads, err := a.recognizer.Recognize(r.Context(),
 		anpr.Image{Bytes: body, ContentType: contentType, CapturedAt: time.Now().UTC()},
 		opts)
+	info := a.recognizer.Info()
 	if err != nil {
-		// 502 because the failure is from the upstream provider.
+		// 502 because the failure is from the upstream provider. Also
+		// stamp the failure into the per-tenant HealthMonitor so the
+		// /providers admin dashboard surfaces the streak.
+		if a.hm != nil {
+			_ = a.hm.Fail(r.Context(), c.TenantID, info.Module, info.Provider, info.Region, err.Error())
+		}
 		a.log.Warn("anpr recognize failed",
-			slog.String("provider", a.recognizer.Info().Provider),
+			slog.String("provider", info.Provider),
 			slog.String("err", err.Error()))
 		httpx.WriteErr(w, httpx.Err(http.StatusBadGateway, "recognize_failed", err.Error()))
 		return
+	}
+	if a.hm != nil {
+		_ = a.hm.OK(r.Context(), c.TenantID, info.Module, info.Provider, info.Region, nil)
 	}
 
 	type readOut struct {
@@ -317,11 +330,34 @@ func (a *API) recognize(w http.ResponseWriter, r *http.Request) {
 // health reports which ANPR provider is currently bound to this replica.
 // The payload mirrors the shape /v1/insurance/health uses so a single
 // admin "providers" page can render all of them uniformly.
+//
+// state / fail_streak / last_ok / last_fail come from the
+// per-(tenant,module,provider) HealthMonitor; if no recognize call has
+// been recorded yet the snapshot is empty and we omit those fields.
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
+	c := auth.ClaimsFrom(r.Context())
 	info := a.recognizer.Info()
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"module":   info.Module,
 		"provider": info.Provider,
 		"region":   info.Region,
-	})
+	}
+	if a.hm != nil && c != nil {
+		state, lastOK, lastFail, streak, err := a.hm.Snapshot(
+			r.Context(), c.TenantID, info.Module, info.Provider)
+		if err == nil {
+			resp["state"] = string(state)
+			resp["fail_streak"] = streak
+			resp["last_ok_at"] = nullableTime(lastOK)
+			resp["last_fail_at"] = nullableTime(lastFail)
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
+}
+
+func nullableTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }
