@@ -11,6 +11,7 @@ const NAV = [
   { href: "/licenses", label: "Driver licenses" },
   { href: "/fines",    label: "Fines" },
   { href: "/anpr",     label: "ANPR feed" },
+  { href: "/officers", label: "Officer activity" },
   { href: "/providers", label: "Provider health" },
   { href: "/audit",    label: "Audit" },
 ];

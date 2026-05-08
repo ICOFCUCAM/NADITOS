@@ -9,6 +9,7 @@ package api
 
 import (
 	"crypto/sha256"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
@@ -18,22 +19,39 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
 )
 
-type API struct {
-	cfg  config.Service
-	log  *slog.Logger
-	pool *pgxpool.Pool
+// Rollup is the part of the rollup.Job the audit API needs — kept as a
+// minimal interface so the api package doesn't import the rollup
+// package's full surface.
+type Rollup interface {
+	RunOnce(ctx context.Context) error
 }
 
-func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool) http.Handler {
-	a := &API{cfg: cfg, log: log, pool: pool}
+type API struct {
+	cfg    config.Service
+	log    *slog.Logger
+	pool   *pgxpool.Pool
+	issuer *auth.Issuer
+	rollup Rollup
+}
+
+func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
+	issuer *auth.Issuer, roll Rollup) http.Handler {
+	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, rollup: roll}
 	mux := http.NewServeMux()
+	// audit log
 	mux.HandleFunc("POST /v1/audit/events", a.write)
 	mux.HandleFunc("GET  /v1/audit/events", a.list)
 	mux.HandleFunc("GET  /v1/audit/verify", a.verify)
+	// officer analytics — admin only
+	mux.Handle("GET  /v1/audit/officers/stats",
+		issuer.Middleware(auth.RequirePermission("audit:read")(http.HandlerFunc(a.officerStats))))
+	mux.Handle("POST /v1/audit/officers/stats:rebuild",
+		issuer.Middleware(auth.RequirePermission("audit:read")(http.HandlerFunc(a.rebuildStats))))
 	return mux
 }
 
