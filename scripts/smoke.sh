@@ -364,5 +364,18 @@ done
 }
 echo "  ✓ license.reinstated delivered"
 
+# ─── 13. final audit chain integrity ───────────────────────────────────
+# Re-verify the audit chain AFTER the demerit loop so any tamper in
+# rows added between stages 8 and 12 is caught. The chain length here
+# proves the suspension and reinstatement events were also stamped.
+echo "→ final audit chain verify"
+V=$(curl -sS "http://localhost:8007/v1/audit/verify?tenant_id=$TENANT" "${H_TENANT[@]}" \
+      -H "Authorization: Bearer $ADMIN_TOKEN")
+OK=$(echo "$V" | jq -r .ok)
+CHK=$(echo "$V" | jq -r .checked)
+[ "$OK" = true ] || { echo "✗ final chain verification failed: $V"; exit 1; }
+[ "$CHK" -ge 4 ] || { echo "✗ expected ≥4 audit events at end, got $CHK"; exit 1; }
+echo "  ✓ audit chain still valid ($CHK events end-of-run)"
+
 echo
 echo "✅ smoke run complete — all stages green"
