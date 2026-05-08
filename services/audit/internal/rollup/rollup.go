@@ -72,8 +72,9 @@ func (j *Job) Run(ctx context.Context) {
 	}
 }
 
-// RunOnce performs one full pass: aggregate the window, then score.
-// Exposed so tests and the on-demand admin trigger can drive it.
+// RunOnce performs one full pass: aggregate the window, score, and
+// emit anomaly alerts for outliers. Exposed so tests and the on-demand
+// admin trigger can drive it.
 func (j *Job) RunOnce(ctx context.Context) error {
 	start := time.Now()
 	from := time.Now().Add(-j.window).UTC().Format("2006-01-02")
@@ -81,6 +82,9 @@ func (j *Job) RunOnce(ctx context.Context) error {
 		return err
 	}
 	if err := score(ctx, j.pool, from); err != nil {
+		return err
+	}
+	if err := detectAnomalies(ctx, j.pool, from); err != nil {
 		return err
 	}
 	j.log.Info("rollup swept",
@@ -167,3 +171,74 @@ func score(ctx context.Context, pool *pgxpool.Pool, from string) error {
 		   AND s.day        >= $1::date`, from)
 	return err
 }
+
+// detectAnomalies materializes audit_alerts rows from the rollup
+// outputs. Two detectors run today; each is idempotent against
+// audit_alerts_uniq_open_idx so a re-sweep on the same data doesn't
+// duplicate signals.
+//
+//   officer_high_anomaly_z   — z-score above HighAnomalyZThreshold
+//                              against the officer's own 14d baseline
+//   officer_high_cancel_rate — fines_cancelled / fines_issued above
+//                              HighCancelRateThreshold AND ≥ minimum
+//                              activity, so a single-fine day where
+//                              that fine was cancelled doesn't fire
+//
+// Severity stamps the worst observed value so the dashboard can
+// gradient-shade the alert without reading details.
+//
+// The CONFLICT clause matches the open-only partial unique index in
+// the migration: an already-OPEN alert is left alone (DO NOTHING),
+// while a previously-resolved alert is allowed to re-fire as a fresh
+// row when the bad behaviour returns.
+func detectAnomalies(ctx context.Context, pool *pgxpool.Pool, from string) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO audit_alerts
+		   (tenant_id, kind, subject_kind, subject_id, day, severity, details)
+		SELECT s.tenant_id, 'officer_high_anomaly_z', 'officer',
+		       s.officer_id, s.day, s.anomaly_score,
+		       jsonb_build_object('z', s.anomaly_score,
+		                          'fines_issued', s.fines_issued)
+		  FROM officer_daily_stats s
+		 WHERE s.day >= $1::date
+		   AND s.anomaly_score IS NOT NULL
+		   AND s.anomaly_score > $2
+		ON CONFLICT DO NOTHING`, from, HighAnomalyZThreshold); err != nil {
+		return err
+	}
+
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO audit_alerts
+		   (tenant_id, kind, subject_kind, subject_id, day, severity, details)
+		SELECT s.tenant_id, 'officer_high_cancel_rate', 'officer',
+		       s.officer_id, s.day,
+		       (s.fines_cancelled::real / NULLIF(s.fines_issued,0)::real)::real,
+		       jsonb_build_object(
+		         'fines_issued', s.fines_issued,
+		         'fines_cancelled', s.fines_cancelled,
+		         'rate', round(
+		           (s.fines_cancelled::numeric / NULLIF(s.fines_issued,0)::numeric)::numeric,
+		           3))
+		  FROM officer_daily_stats s
+		 WHERE s.day >= $1::date
+		   AND s.fines_issued >= $2
+		   AND s.fines_cancelled::real / s.fines_issued::real > $3
+		ON CONFLICT DO NOTHING`, from, MinActivityForCancelRate, HighCancelRateThreshold); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Tuning knobs. Values tracked here so a future per-tenant override
+// can replace the constants without touching the SQL above.
+const (
+	HighAnomalyZThreshold    = 2.0
+	HighCancelRateThreshold  = 0.30
+	MinActivityForCancelRate = 5
+)

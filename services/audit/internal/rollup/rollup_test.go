@@ -248,6 +248,127 @@ func TestRollup_Idempotent(t *testing.T) {
 	}
 }
 
+// TestDetect_HighAnomalyZ_FiresAlert: an officer with a real spike
+// (z > 2) must produce an audit_alerts row of kind
+// 'officer_high_anomaly_z'. Reuses the realistic-baseline shape from
+// the score test above.
+func TestDetect_HighAnomalyZ_FiresAlert(t *testing.T) {
+	env := testkit.Setup(t)
+	o := seedOfficer(t, env)
+
+	end := time.Now().UTC()
+	dates := []string{
+		end.AddDate(0, 0, -7).Format("2006-01-02"),
+		end.AddDate(0, 0, -6).Format("2006-01-02"),
+		end.AddDate(0, 0, -5).Format("2006-01-02"),
+		end.AddDate(0, 0, -4).Format("2006-01-02"),
+		end.AddDate(0, 0, -3).Format("2006-01-02"),
+		end.AddDate(0, 0, -2).Format("2006-01-02"),
+		end.AddDate(0, 0, -1).Format("2006-01-02"),
+		end.Format("2006-01-02"),
+	}
+	for i, n := range []int{2, 3, 1, 4, 2, 3, 1} {
+		for k := 0; k < n; k++ {
+			seedFine(t, env, o, dates[i], "issued", "10.00")
+		}
+	}
+	for i := 0; i < 20; i++ {
+		seedFine(t, env, o, dates[7], "issued", "10.00")
+	}
+
+	job := rollup.New(env.AdminPool(), discardLogger())
+	if err := job.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var alerts int
+	var sev *float32
+	if err := env.QueryRow(
+		`SELECT count(*), max(severity) FROM audit_alerts
+		  WHERE tenant_id=$1 AND kind='officer_high_anomaly_z'
+		    AND subject_id=$2 AND day=$3::date`,
+		env.Tenant, o, dates[7]).Scan(&alerts, &sev); err != nil {
+		t.Fatal(err)
+	}
+	if alerts != 1 {
+		t.Fatalf("want 1 alert, got %d", alerts)
+	}
+	if sev == nil || *sev < 2 {
+		t.Fatalf("severity should be > 2 (the threshold), got %v", sev)
+	}
+
+	// Re-running must NOT add another open alert (idempotency).
+	if err := job.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.QueryRow(
+		`SELECT count(*) FROM audit_alerts
+		  WHERE tenant_id=$1 AND kind='officer_high_anomaly_z'
+		    AND subject_id=$2 AND day=$3::date AND resolved_at IS NULL`,
+		env.Tenant, o, dates[7]).Scan(&alerts); err != nil {
+		t.Fatal(err)
+	}
+	if alerts != 1 {
+		t.Fatalf("idempotent re-run: want 1 open alert, got %d", alerts)
+	}
+}
+
+// TestDetect_HighCancelRate: an officer who issues 10 fines and
+// cancels 5 of them today (50% > 30% threshold) must trip the
+// 'officer_high_cancel_rate' detector. This is the classic
+// issue-then-cancel-for-show signal.
+func TestDetect_HighCancelRate(t *testing.T) {
+	env := testkit.Setup(t)
+	o := seedOfficer(t, env)
+	day := time.Now().UTC().Format("2006-01-02")
+	for i := 0; i < 5; i++ {
+		seedFine(t, env, o, day, "issued", "100.00")
+	}
+	for i := 0; i < 5; i++ {
+		seedFine(t, env, o, day, "cancelled", "100.00")
+	}
+	if err := rollup.New(env.AdminPool(), discardLogger()).RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var cnt int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM audit_alerts
+		  WHERE tenant_id=$1 AND kind='officer_high_cancel_rate'
+		    AND subject_id=$2 AND day=$3::date`,
+		env.Tenant, o, day).Scan(&cnt); err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 1 {
+		t.Fatalf("want 1 cancel-rate alert, got %d", cnt)
+	}
+}
+
+// TestDetect_BelowMinActivity_NoFalsePositive: 1 fine cancelled out of
+// 1 fine issued is 100% cancel rate but trivially under-supported —
+// the detector requires MinActivityForCancelRate fines before firing
+// so a single rejected ticket doesn't flag an honest officer.
+func TestDetect_BelowMinActivity_NoFalsePositive(t *testing.T) {
+	env := testkit.Setup(t)
+	o := seedOfficer(t, env)
+	day := time.Now().UTC().Format("2006-01-02")
+	seedFine(t, env, o, day, "cancelled", "100.00")
+	if err := rollup.New(env.AdminPool(), discardLogger()).RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var cnt int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM audit_alerts
+		  WHERE tenant_id=$1 AND kind='officer_high_cancel_rate'
+		    AND subject_id=$2`,
+		env.Tenant, o).Scan(&cnt); err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 0 {
+		t.Fatalf("want 0 alerts under min activity, got %d", cnt)
+	}
+}
+
 // TestRollup_TenantIsolation: tenant A's officer rows don't appear in
 // tenant B's stats. RLS isn't strictly required here (the rollup runs
 // with BYPASSRLS) but the per-tenant filter in the WHERE clause is —

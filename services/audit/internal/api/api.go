@@ -52,6 +52,12 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 		issuer.Middleware(auth.RequirePermission("audit:read")(http.HandlerFunc(a.officerStats))))
 	mux.Handle("POST /v1/audit/officers/stats:rebuild",
 		issuer.Middleware(auth.RequirePermission("audit:read")(http.HandlerFunc(a.rebuildStats))))
+	// alerts surface — also gated behind audit:read since alerts can
+	// reveal which officers are under suspicion.
+	mux.Handle("GET  /v1/audit/alerts",
+		issuer.Middleware(auth.RequirePermission("audit:read")(http.HandlerFunc(a.listAlerts))))
+	mux.Handle("POST /v1/audit/alerts/{id}/resolve",
+		issuer.Middleware(auth.RequirePermission("audit:read")(http.HandlerFunc(a.resolveAlert))))
 	return mux
 }
 
