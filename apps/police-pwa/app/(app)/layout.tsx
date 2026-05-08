@@ -19,8 +19,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <div className="text-xs text-slate-400">{session.user.full_name}</div>
       </header>
       <main className="flex-1">{children}</main>
-      <nav className="grid grid-cols-3 border-t border-slate-700 bg-slate-800">
+      <nav className="grid grid-cols-4 border-t border-slate-700 bg-slate-800">
         <NavLink href="/scan"   label="Scan" />
+        <NavLink href="/verify" label="Verify" />
         <NavLink href="/recent" label="Recent" />
         <NavLink href="/me"     label="Me" onClick={() => logout().then(() => router.replace("/login"))} />
       </nav>
