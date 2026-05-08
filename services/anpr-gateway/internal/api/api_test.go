@@ -255,6 +255,84 @@ func TestHealth_StreakBumpedOnFailure(t *testing.T) {
 	}
 }
 
+// TestRecognize_OpenALPR_EndToEnd: wire the REAL OpenALPR adapter
+// (not the captureSender stub) against an httptest mock that speaks
+// the OpenALPR Cloud API v3 wire format. Proves the contract pattern
+// holds when a real adapter is plugged in: image bytes flow from the
+// multipart upload to the upstream as base64; the upstream's results
+// array round-trips back as the API's ranked candidates.
+func TestRecognize_OpenALPR_EndToEnd(t *testing.T) {
+	env := testkit.Setup(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/v3/recognize_bytes") {
+			t.Errorf("upstream path: %s", r.URL.Path)
+		}
+		_ = r.ParseForm()
+		// secret_key from the adapter, country from per-call opts.
+		if got := r.FormValue("secret_key"); got != "k1" {
+			t.Errorf("secret_key: %q", got)
+		}
+		if got := r.FormValue("country"); got != "fr" {
+			t.Errorf("country: %q", got)
+		}
+		_, _ = w.Write([]byte(`{"results":[
+			{"plate":"AB-12-CD","confidence":94.0,"region":"fr",
+			 "coordinates":[{"x":10,"y":20},{"x":120,"y":21},{"x":118,"y":50},{"x":12,"y":48}]},
+			{"plate":"AB-1Z-CD","confidence":82.5,"region":"fr"}
+		]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	rec := &anpr.OpenALPR{
+		BaseURL: upstream.URL, SecretKey: "k1", Country: "us",
+		HTTPClient: upstream.Client(),
+	}
+	hm := connectors.NewHealthMonitor(env.AdminPool())
+	h := api.New(env.Cfg, discardLogger(), env.Pool, env.Issuer, rec, hm)
+
+	tok, _ := env.Token("officer", "anpr:scan")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, imageRequest(t, env, tok, []byte("fake-jpg"), map[string]string{
+		"country":  "fr", // overrides adapter default
+		"min_conf": "0.5",
+	}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d %s", w.Code, w.Body.String())
+	}
+
+	var out struct {
+		Provider string `json:"provider"`
+		Reads    []struct {
+			Plate      string  `json:"plate"`
+			Confidence float32 `json:"confidence"`
+			Region     string  `json:"region"`
+		} `json:"reads"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Provider != "openalpr" {
+		t.Fatalf("provider: %s", out.Provider)
+	}
+	if len(out.Reads) != 2 {
+		t.Fatalf("want 2 reads, got %d", len(out.Reads))
+	}
+	if out.Reads[0].Plate != "AB-12-CD" || out.Reads[0].Region != "fr" {
+		t.Fatalf("top read: %+v", out.Reads[0])
+	}
+	if out.Reads[0].Confidence < 0.93 || out.Reads[0].Confidence > 0.95 {
+		t.Fatalf("top confidence rescaled wrong: %f", out.Reads[0].Confidence)
+	}
+
+	// HealthMonitor also got a hit.
+	state, lastOK, _, streak, _ := hm.Snapshot(env.Ctx, env.Tenant, "anpr", "openalpr")
+	if string(state) != "ok" || streak != 0 || lastOK.IsZero() {
+		t.Fatalf("expected ok/0 with last_ok set, got state=%s streak=%d lastOK=%v",
+			state, streak, lastOK)
+	}
+}
+
 // TestHealth_StreakResetsOnSuccess: a single successful recognize
 // after failures clears the streak and flips state back to ok.
 func TestHealth_StreakResetsOnSuccess(t *testing.T) {
