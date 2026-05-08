@@ -72,21 +72,15 @@ func (c *Consumer) tick(ctx context.Context) error {
 	}
 	defer conn.Release()
 
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	// Read offset and lock the row so multiple consumer replicas don't
-	// race on the same batch.
+	// 1. Read the current offset.
 	var lastID int64
-	err = tx.QueryRow(ctx,
-		`SELECT last_event_id FROM event_consumer_offsets
-		  WHERE consumer=$1 FOR UPDATE`, consumerName).Scan(&lastID)
+	err = conn.QueryRow(ctx,
+		`SELECT last_event_id FROM event_consumer_offsets WHERE consumer=$1`,
+		consumerName).Scan(&lastID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO event_consumer_offsets (consumer, last_event_id) VALUES ($1, 0)`,
+		if _, err := conn.Exec(ctx,
+			`INSERT INTO event_consumer_offsets (consumer, last_event_id) VALUES ($1, 0)
+			 ON CONFLICT DO NOTHING`,
 			consumerName); err != nil {
 			return err
 		}
@@ -95,7 +89,8 @@ func (c *Consumer) tick(ctx context.Context) error {
 		return err
 	}
 
-	rows, err := tx.Query(ctx,
+	// 2. Read the batch (no tx — we'll start a fresh one per event).
+	rows, err := conn.Query(ctx,
 		`SELECT id, envelope FROM event_outbox
 		  WHERE id > $1 ORDER BY id ASC LIMIT $2`,
 		lastID, c.batch)
@@ -116,16 +111,20 @@ func (c *Consumer) tick(ctx context.Context) error {
 	}
 	rows.Close()
 	if len(batch) == 0 {
-		return tx.Commit(ctx)
+		return nil
 	}
 
+	// 3. Process each event in its OWN transaction. A poisoned event
+	//    (FK violation, missing tenant, malformed envelope) doesn't
+	//    abort the batch — its tx rolls back, the next event gets a
+	//    fresh tx, and the offset still advances past it.
 	for _, p := range batch {
 		var env events.Envelope
 		if err := json.Unmarshal(p.body, &env); err != nil {
 			c.log.Warn("notifications: bad envelope", "id", p.id, "err", err)
 			continue
 		}
-		if err := c.handleEvent(ctx, tx, p.id, env); err != nil {
+		if err := c.handleEventInTx(ctx, conn, p.id, env); err != nil {
 			c.log.Warn("notifications: handler failed",
 				slog.Int64("event_id", p.id),
 				slog.String("type", env.Type),
@@ -133,14 +132,30 @@ func (c *Consumer) tick(ctx context.Context) error {
 		}
 	}
 
-	// Always advance past the highest id we read, even if some sends
-	// failed — failures are durable in notification_records and a
-	// separate retry job (Phase-4) handles them.
+	// 4. Advance offset past the highest id we saw, even if some
+	//    sends failed — failures are durable in notification_records
+	//    and Phase-4 retries via a separate reaper.
 	highest := batch[len(batch)-1].id
-	if _, err := tx.Exec(ctx,
+	if _, err := conn.Exec(ctx,
 		`UPDATE event_consumer_offsets
 		    SET last_event_id=$2, updated_at=now()
 		  WHERE consumer=$1`, consumerName, highest); err != nil {
+		return err
+	}
+	return nil
+}
+
+// handleEventInTx wraps one event's handling in its own transaction.
+// Per-event isolation keeps one poisoned event (e.g. FK violation
+// against a torn-down test tenant) from aborting sibling events in
+// the same batch.
+func (c *Consumer) handleEventInTx(ctx context.Context, conn *pgxpool.Conn, eventID int64, env events.Envelope) error {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	if err := c.handleEvent(ctx, tx, eventID, env); err != nil {
+		_ = tx.Rollback(ctx)
 		return err
 	}
 	return tx.Commit(ctx)
@@ -189,6 +204,11 @@ func (c *Consumer) handleEvent(ctx context.Context, tx pgx.Tx, eventID int64, en
 	}
 
 	// Send via the configured provider.
+	//
+	// Send failures are RECORDED, not propagated: the row stays in
+	// notification_records with status='failed', and we return nil so
+	// the per-event tx commits and the consumer advances its offset.
+	// Reaping failed rows for retry is Phase-4 work.
 	receipt, err := c.send.Send(ctx, notifications.Message{
 		TenantID:   env.TenantID,
 		Channel:    notifications.Channel(rec.Channel),
@@ -198,16 +218,23 @@ func (c *Consumer) handleEvent(ctx context.Context, tx pgx.Tx, eventID int64, en
 		TemplateID: r.template,
 	})
 	if err != nil {
-		_, _ = tx.Exec(ctx,
+		if _, uerr := tx.Exec(ctx,
 			`UPDATE notification_records
 			    SET status='failed', last_error=$2, attempts=attempts+1
-			  WHERE id=$1`, notifID, err.Error())
-		return fmt.Errorf("send: %w", err)
+			  WHERE id=$1`, notifID, err.Error()); uerr != nil {
+			return fmt.Errorf("mark failed: %w", uerr)
+		}
+		c.log.Warn("notifications: send failed (recorded)",
+			slog.String("provider", c.send.Info().Provider),
+			slog.String("err", err.Error()))
+		return nil
 	}
-	_, _ = tx.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`UPDATE notification_records
 		    SET status='sent', sent_at=now(),
 		        provider=$2, provider_ref=$3, attempts=attempts+1
-		  WHERE id=$1`, notifID, c.send.Info().Provider, receipt.ID)
+		  WHERE id=$1`, notifID, c.send.Info().Provider, receipt.ID); err != nil {
+		return fmt.Errorf("mark sent: %w", err)
+	}
 	return nil
 }

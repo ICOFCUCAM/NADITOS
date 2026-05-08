@@ -13,6 +13,7 @@ import (
 
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
+	"github.com/icofcucam/naditos/packages/go-common/contracts/anpr"
 	"github.com/icofcucam/naditos/packages/go-common/db"
 	"github.com/icofcucam/naditos/packages/go-common/events"
 	"github.com/icofcucam/naditos/packages/go-common/logger"
@@ -47,7 +48,13 @@ func main() {
 		log.Info("anpr worker started")
 	}
 	if *mode == "api" || *mode == "both" {
-		h := api.New(cfg, log, pool, issuer)
+		// ANPR_PROVIDER=openalpr + OPENALPR_SECRET_KEY → real upstream;
+		// otherwise the dev-stub returns no detections so the police PWA
+		// stays in manual-entry mode without any extra config.
+		recognizer := anpr.NewFromEnv(log)
+		log.Info("anpr provider wired",
+			"provider", recognizer.Info().Provider)
+		h := api.New(cfg, log, pool, issuer, recognizer)
 		if err := server.Run(ctx, log, "anpr-gateway", cfg.Port, h); err != nil {
 			log.Error("server exited", "err", err)
 		}

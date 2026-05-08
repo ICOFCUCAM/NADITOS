@@ -4,6 +4,8 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -14,19 +16,22 @@ import (
 
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
+	"github.com/icofcucam/naditos/packages/go-common/contracts/anpr"
 	"github.com/icofcucam/naditos/packages/go-common/db"
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
 )
 
 type API struct {
-	cfg    config.Service
-	log    *slog.Logger
-	pool   *pgxpool.Pool
-	issuer *auth.Issuer
+	cfg        config.Service
+	log        *slog.Logger
+	pool       *pgxpool.Pool
+	issuer     *auth.Issuer
+	recognizer anpr.Recognizer
 }
 
-func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool, issuer *auth.Issuer) http.Handler {
-	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer}
+func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
+	issuer *auth.Issuer, recognizer anpr.Recognizer) http.Handler {
+	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, recognizer: recognizer}
 	mux := http.NewServeMux()
 
 	// Single-scan ingest. Officer devices and edge cameras hit this in
@@ -39,6 +44,12 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool, issuer *auth.
 	mux.Handle("POST /v1/anpr/scans:batch",
 		issuer.Middleware(auth.RequirePermission("anpr:scan")(http.HandlerFunc(a.enqueueBatch))))
 
+	// Recognize: synchronous OCR on a freshly captured image. Officer
+	// uploads a photo, gets back ranked plate candidates, then submits
+	// the chosen one to /v1/anpr/scans for async matching.
+	mux.Handle("POST /v1/anpr/recognize",
+		issuer.Middleware(auth.RequirePermission("anpr:scan")(http.HandlerFunc(a.recognize))))
+
 	// Job status — clients poll for the resolved scan + match.
 	mux.Handle("GET /v1/anpr/jobs/{id}",
 		issuer.Middleware(auth.RequirePermission("anpr:scan")(http.HandlerFunc(a.jobStatus))))
@@ -46,6 +57,10 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool, issuer *auth.
 	// Recent scans — for officer feed.
 	mux.Handle("GET /v1/anpr/scans",
 		issuer.Middleware(auth.RequirePermission("anpr:scan")(http.HandlerFunc(a.listScans))))
+
+	// Provider health snapshot — what's wired right now.
+	mux.Handle("GET /v1/anpr/health",
+		issuer.Middleware(http.HandlerFunc(a.health)))
 
 	return mux
 }
@@ -219,4 +234,94 @@ func nilIfZero(f float64) any {
 		return nil
 	}
 	return f
+}
+
+// recognize accepts a multipart upload of one image and runs the
+// configured Recognizer synchronously. Returns ranked candidates so
+// the officer's PWA can show "we read it as ABC123 (94%)" and let the
+// officer confirm or override. The chosen plate is then submitted
+// separately to POST /v1/anpr/scans for async matching.
+//
+//	multipart/form-data:
+//	  image     (required)  the captured frame, jpeg/png
+//	  country   (optional)  2-letter override (e.g. "fr"); defaults to
+//	                         provider config
+//	  min_conf  (optional)  0..1 cutoff; reads below are dropped
+const recognizeMaxBytes = 8 << 20 // 8 MiB
+
+func (a *API) recognize(w http.ResponseWriter, r *http.Request) {
+	c := auth.ClaimsFrom(r.Context())
+	if err := r.ParseMultipartForm(recognizeMaxBytes); err != nil {
+		httpx.WriteErr(w, httpx.Err(http.StatusBadRequest, "bad_multipart", err.Error()))
+		return
+	}
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		httpx.WriteErr(w, httpx.Err(http.StatusBadRequest, "missing_image", "form field 'image' is required"))
+		return
+	}
+	defer file.Close()
+
+	// Cap at 8 MiB so a malicious upload can't OOM the worker.
+	body, err := io.ReadAll(io.LimitReader(file, recognizeMaxBytes))
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	if len(body) == 0 {
+		httpx.WriteErr(w, httpx.Err(http.StatusBadRequest, "empty_image", "image is empty"))
+		return
+	}
+
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "image/jpeg"
+	}
+
+	opts := anpr.RecognizeOpts{TenantID: c.TenantID, Country: r.FormValue("country")}
+	if v := r.FormValue("min_conf"); v != "" {
+		var f float32
+		if _, err := fmt.Sscanf(v, "%f", &f); err == nil {
+			opts.MinConf = f
+		}
+	}
+
+	reads, err := a.recognizer.Recognize(r.Context(),
+		anpr.Image{Bytes: body, ContentType: contentType, CapturedAt: time.Now().UTC()},
+		opts)
+	if err != nil {
+		// 502 because the failure is from the upstream provider.
+		a.log.Warn("anpr recognize failed",
+			slog.String("provider", a.recognizer.Info().Provider),
+			slog.String("err", err.Error()))
+		httpx.WriteErr(w, httpx.Err(http.StatusBadGateway, "recognize_failed", err.Error()))
+		return
+	}
+
+	type readOut struct {
+		Plate      string  `json:"plate"`
+		Confidence float32 `json:"confidence"`
+		Region     string  `json:"region,omitempty"`
+		BBox       *anpr.BBox `json:"bbox,omitempty"`
+	}
+	out := make([]readOut, 0, len(reads))
+	for _, rd := range reads {
+		out = append(out, readOut{Plate: rd.Plate, Confidence: rd.Confidence, Region: rd.Region, BBox: rd.BBox})
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"provider": a.recognizer.Info().Provider,
+		"reads":    out,
+	})
+}
+
+// health reports which ANPR provider is currently bound to this replica.
+// The payload mirrors the shape /v1/insurance/health uses so a single
+// admin "providers" page can render all of them uniformly.
+func (a *API) health(w http.ResponseWriter, r *http.Request) {
+	info := a.recognizer.Info()
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"module":   info.Module,
+		"provider": info.Provider,
+		"region":   info.Region,
+	})
 }
