@@ -8,6 +8,7 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/db"
 	"github.com/icofcucam/naditos/packages/go-common/logger"
 	"github.com/icofcucam/naditos/packages/go-common/server"
+	"github.com/icofcucam/naditos/services/audit/internal/anpralerts"
 	"github.com/icofcucam/naditos/services/audit/internal/api"
 	"github.com/icofcucam/naditos/services/audit/internal/rollup"
 )
@@ -34,6 +35,11 @@ func main() {
 	// queries need to read across tenants.
 	job := rollup.New(pool, log)
 	go job.Run(ctx)
+
+	// ANPR alert consumer: each anpr.alert event (stolen / seized /
+	// wanted vehicle scanned) lands in audit_alerts so dispatch /
+	// admin sees it on the same /audit page as the rollup anomalies.
+	go anpralerts.Run(ctx, pool, log)
 
 	h := api.New(cfg, log, pool, issuer, job)
 	if err := server.Run(ctx, log, "audit", cfg.Port, h); err != nil {
