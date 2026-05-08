@@ -13,6 +13,7 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/logger"
 	"github.com/icofcucam/naditos/packages/go-common/server"
 	"github.com/icofcucam/naditos/services/fines/internal/api"
+	"github.com/icofcucam/naditos/services/fines/internal/escalation"
 )
 
 func main() {
@@ -39,6 +40,11 @@ func main() {
 	bus := events.OpenPublisher(os.Getenv("NATS_URL"), log)
 	relay := events.NewRelay(pool, log, bus)
 	go relay.Run(ctx)
+
+	// Background escalation: walks unpaid fines through the per-tenant
+	// regulation_escalation stages (warning → penalty → flag → seize →
+	// court). Sweep every 5 minutes by default.
+	go escalation.New(pool, log).Run(ctx)
 
 	h := api.New(cfg, log, pool, issuer, auditCl, pay, bus)
 	if err := server.Run(ctx, log, "fines", cfg.Port, h); err != nil {

@@ -30,9 +30,10 @@ type renderer struct {
 // renderers is the registry mapping event types to their renderer.
 // New event subscribers are added here.
 var renderers = map[string]renderer{
-	events.TypeFineIssued:       fineIssuedRenderer,
-	events.TypeFinePaid:         finePaidRenderer,
-	events.TypeLicenseSuspended: licenseSuspendedRenderer,
+	events.TypeFineIssued:        fineIssuedRenderer,
+	events.TypeFinePaid:          finePaidRenderer,
+	events.TypeFineEscalated:     fineEscalatedRenderer,
+	events.TypeLicenseSuspended:  licenseSuspendedRenderer,
 	events.TypeLicenseReinstated: licenseReinstatedRenderer,
 }
 
@@ -170,6 +171,38 @@ var licenseSuspendedRenderer = renderer{
 				"Until: %s\n\n"+
 				"NADITOS",
 			r.Name, p.Reason, p.StartsAt, p.EndsAt)
+		return subject, body
+	},
+}
+
+// fineEscalatedRenderer messages the citizen when an unpaid fine
+// crosses an escalation stage (warning → penalty → flag → seize →
+// court). The body is intentionally calm: the goal is to nudge
+// payment, not threaten.
+var fineEscalatedRenderer = renderer{
+	template: "fine.escalated.v1",
+	resolve: func(ctx context.Context, tx pgx.Tx, env events.Envelope) (*recipient, error) {
+		var p events.FineEscalatedPayload
+		if err := decodeData(env.Data, &p); err != nil {
+			return nil, err
+		}
+		var vehicleID string
+		_ = tx.QueryRow(ctx,
+			`SELECT COALESCE(vehicle_id::text,'') FROM fines
+			  WHERE id=$1 AND tenant_id=$2`, p.FineID, env.TenantID).Scan(&vehicleID)
+		return resolveByVehicle(ctx, tx, env.TenantID, vehicleID)
+	},
+	render: func(env events.Envelope, r *recipient) (string, string) {
+		var p events.FineEscalatedPayload
+		_ = decodeData(env.Data, &p)
+		subject := "Action required on outstanding fine"
+		body := fmt.Sprintf(
+			"Hello %s,\n\n"+
+				"Your unpaid fine has moved to escalation stage %d (%s).\n"+
+				"Reference: %s\n\n"+
+				"Please pay or dispute via the citizen portal to avoid "+
+				"further action.\n\nNADITOS",
+			r.Name, p.ToStage, p.Action, p.FineID[:8])
 		return subject, body
 	},
 }

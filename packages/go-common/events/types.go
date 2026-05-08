@@ -68,6 +68,14 @@ type FineDisputedPayload struct {
 	Reason  string `json:"reason"`
 }
 
+type FineEscalatedPayload struct {
+	FineID    string `json:"fine_id"`
+	FromStage int    `json:"from_stage"`
+	ToStage   int    `json:"to_stage"`
+	Action    string `json:"action"`     // warning|penalty|flag|seize|court
+	NewStatus string `json:"new_status"` // resulting fine_status, if changed
+}
+
 type VehicleCreatedPayload struct {
 	VehicleID string `json:"vehicle_id"`
 	Plate     string `json:"plate"`
