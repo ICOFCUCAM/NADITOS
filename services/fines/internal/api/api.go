@@ -22,6 +22,7 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/audit"
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
+	"github.com/icofcucam/naditos/packages/go-common/connectors"
 	"github.com/icofcucam/naditos/packages/go-common/contracts/payments"
 	"github.com/icofcucam/naditos/packages/go-common/db"
 	"github.com/icofcucam/naditos/packages/go-common/events"
@@ -35,13 +36,15 @@ type API struct {
 	issuer  *auth.Issuer
 	audit   *audit.Client
 	pay     payments.Provider
+	hm      *connectors.HealthMonitor
 	bus     events.Publisher
 }
 
 func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	issuer *auth.Issuer, audit *audit.Client,
-	pay payments.Provider, bus events.Publisher) http.Handler {
-	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, audit: audit, pay: pay, bus: bus}
+	pay payments.Provider, hm *connectors.HealthMonitor, bus events.Publisher) http.Handler {
+	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, audit: audit,
+		pay: pay, hm: hm, bus: bus}
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:create")(http.HandlerFunc(a.issue))))
 	mux.Handle("GET  /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:read")(http.HandlerFunc(a.list))))
@@ -50,6 +53,8 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	mux.Handle("POST /v1/fines/{id}/pay", issuer.Middleware(http.HandlerFunc(a.handlePay)))
 	mux.Handle("POST /v1/fines/{id}/dispute", issuer.Middleware(http.HandlerFunc(a.dispute)))
 	mux.Handle("POST /v1/fines/{id}/cancel",  issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.cancel))))
+	mux.Handle("GET  /v1/fines/payments/health",
+		issuer.Middleware(http.HandlerFunc(a.paymentsHealth)))
 	return mux
 }
 
@@ -496,9 +501,18 @@ func (a *API) handlePay(w http.ResponseWriter, r *http.Request) {
 		Method:         in.Method,
 		Metadata:       map[string]string{"fine_id": id.String()},
 	})
+	info := a.pay.Info()
 	if err != nil {
+		if a.hm != nil {
+			_ = a.hm.Fail(r.Context(), c.TenantID,
+				info.Module, info.Provider, info.Region, err.Error())
+		}
 		httpx.WriteErr(w, err)
 		return
+	}
+	if a.hm != nil {
+		_ = a.hm.OK(r.Context(), c.TenantID,
+			info.Module, info.Provider, info.Region, nil)
 	}
 	providerRef := intent.ID
 	status := "pending"
@@ -647,4 +661,35 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = a.audit.Emit(r.Context(), "fine.cancel", "fine", id.String(), nil, in)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// paymentsHealth surfaces the per-tenant fail-streak for the bound
+// payment provider so the admin /providers tile can render it next to
+// ANPR / insurance / inspection. State / timestamps come from the same
+// HealthMonitor those services use; if no payment has been attempted
+// yet for this tenant the snapshot is empty and the timestamps are
+// omitted from the response.
+func (a *API) paymentsHealth(w http.ResponseWriter, r *http.Request) {
+	c := auth.ClaimsFrom(r.Context())
+	info := a.pay.Info()
+	resp := map[string]any{
+		"module":   info.Module,
+		"provider": info.Provider,
+		"region":   info.Region,
+	}
+	if a.hm != nil && c != nil {
+		state, lastOK, lastFail, streak, err := a.hm.Snapshot(
+			r.Context(), c.TenantID, info.Module, info.Provider)
+		if err == nil {
+			resp["state"] = string(state)
+			resp["fail_streak"] = streak
+			if !lastOK.IsZero() {
+				resp["last_ok_at"] = lastOK
+			}
+			if !lastFail.IsZero() {
+				resp["last_fail_at"] = lastFail
+			}
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }

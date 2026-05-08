@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	commonAudit "github.com/icofcucam/naditos/packages/go-common/audit"
+	"github.com/icofcucam/naditos/packages/go-common/connectors"
 	"github.com/icofcucam/naditos/packages/go-common/contracts/payments"
 	"github.com/icofcucam/naditos/packages/go-common/events"
 	"github.com/icofcucam/naditos/packages/go-common/testkit"
@@ -31,6 +32,7 @@ func build(env *testkit.Env) http.Handler {
 		env.Pool, env.Issuer,
 		commonAudit.New("", "fines"), // empty URL → no-op audit emit
 		payments.NewDevStub(),
+		connectors.NewHealthMonitor(env.AdminPool()),
 		events.NewInProc(discardLogger()),
 	)
 }
@@ -597,5 +599,62 @@ func TestFineIssue_CustodyRollsBackOnDuplicate(t *testing.T) {
 	}
 	if rows != 1 {
 		t.Fatalf("want exactly 1 custody row (duplicate must roll back), got %d", rows)
+	}
+}
+
+// TestPaymentsHealth_RecordsOK: a successful pay call against the
+// dev-stub provider must register an OK on the per-tenant
+// HealthMonitor, and GET /v1/fines/payments/health must surface it
+// alongside the bound provider's identity. Mirrors the shape used by
+// /v1/inspection/health and /v1/anpr/health so the admin /providers
+// tile can render payments uniformly.
+func TestPaymentsHealth_RecordsOK(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	officerTok, _ := env.Token("officer", "fines:create")
+	citizenTok, _ := env.Token("citizen")
+	h := build(env)
+
+	// Issue, then pay.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("issue: %d %s", rec.Code, rec.Body.String())
+	}
+	var issued struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &issued); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST",
+		"/v1/fines/"+issued.ID+"/pay",
+		`{"method":"card"}`, citizenTok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pay: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Now hit the health endpoint and confirm OK was recorded.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/fines/payments/health", "", citizenTok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health: %d %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Module     string `json:"module"`
+		Provider   string `json:"provider"`
+		State      string `json:"state"`
+		FailStreak int    `json:"fail_streak"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Module != "payments" || got.Provider != "dev-stub" {
+		t.Fatalf("provider identity wrong: %+v", got)
+	}
+	if got.State != "ok" || got.FailStreak != 0 {
+		t.Fatalf("expected ok/0, got %+v", got)
 	}
 }

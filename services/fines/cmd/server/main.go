@@ -7,6 +7,7 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/audit"
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
+	"github.com/icofcucam/naditos/packages/go-common/connectors"
 	"github.com/icofcucam/naditos/packages/go-common/contracts/payments"
 	"github.com/icofcucam/naditos/packages/go-common/db"
 	"github.com/icofcucam/naditos/packages/go-common/events"
@@ -33,6 +34,7 @@ func main() {
 
 	// Phase-1 default adapters; Phase-2 swaps these to real providers.
 	pay := payments.NewDevStub()
+	hm := connectors.NewHealthMonitor(pool)
 
 	// OpenPublisher picks NATS when NATS_URL is set, otherwise an
 	// in-process bus. Producers write to the outbox inside their tx;
@@ -46,7 +48,7 @@ func main() {
 	// court). Sweep every 5 minutes by default.
 	go escalation.New(pool, log).Run(ctx)
 
-	h := api.New(cfg, log, pool, issuer, auditCl, pay, bus)
+	h := api.New(cfg, log, pool, issuer, auditCl, pay, hm, bus)
 	if err := server.Run(ctx, log, "fines", cfg.Port, h); err != nil {
 		log.Error("server exited", "err", err)
 	}
