@@ -27,13 +27,24 @@ func Health() http.Handler {
 	return mux
 }
 
-// Mount layers the health endpoints onto an existing handler.
+// Mount layers the health and metrics endpoints onto an existing handler.
 func Mount(h http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", Health())
 	mux.Handle("/livez", Health())
+	mux.Handle("/metrics", metricsHandler())
 	mux.Handle("/", h)
 	return mux
+}
+
+// metricsHandler is wired here so the server package doesn't have to
+// import observability (which imports net/http already). Services that
+// want richer metrics replace this with observability.MetricsHandler().
+func metricsHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte("# NADITOS metrics — see observability.MetricsHandler for full export\n"))
+	})
 }
 
 func Run(ctx context.Context, log *slog.Logger, port int, h http.Handler) error {

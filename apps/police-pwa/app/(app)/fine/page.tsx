@@ -21,7 +21,11 @@ export default function FinePage() {
   const sp = useSearchParams();
   const router = useRouter();
   const [plate, setPlate] = useState(sp.get("plate") ?? "");
-  const [offence, setOffence] = useState(OFFENCES[0].code);
+  const [offence, setOffence] = useState(
+    OFFENCES.some((o) => o.code === sp.get("offence"))
+      ? (sp.get("offence") as string)
+      : OFFENCES[0].code,
+  );
   const [photoB64, setPhotoB64] = useState<string | null>(null);
   const [photoSha, setPhotoSha] = useState<string | null>(null);
   const [photoBytes, setPhotoBytes] = useState<number>(0);

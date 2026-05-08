@@ -12,11 +12,16 @@
 - [x] Citizen app (vehicles + fines + pay-stub)
 - [x] Docker compose for local dev
 - [x] K8s manifests + Vercel config
-- [ ] Driver license module (scaffold ready)
-- [ ] Insurance verification module (scaffold ready)
-- [ ] Roadworthiness module (scaffold ready)
+- [x] Driver license module — full lifecycle, demerit engine, QR/NFC verify
+- [x] Insurance verification module — provider router + retry queue + health monitor
+- [x] Roadworthiness module — same connector framework
+- [x] ANPR gateway — async pipeline with normalization, dedup, event emission
+- [x] Country regulation packs — versioned manifest + hot-reloading loader
+- [x] Provider connector framework — retry queue, health monitor, country router
+- [x] Domain event bus — InProc + NATS-shaped transport + DB outbox relay
+- [x] OpenAPI 3.1 spec for the gateway
+- [x] Observability — request id, structured logs, metrics endpoint
 - [ ] Notifications (scaffold ready)
-- [ ] ANPR gateway (scaffold ready)
 
 ## Phase 2 — production hardening
 

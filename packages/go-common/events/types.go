@@ -16,6 +16,18 @@ const (
 	TypeVehicleStatusBlack = "vehicle.status.black" // v1
 
 	TypeAnprScan        = "anpr.scan"          // v1
+	TypeAnprMatched     = "anpr.matched"       // v1 — scan matched a known vehicle
+	TypeAnprAlert       = "anpr.alert"         // v1 — scan matched stolen/seized/wanted
+
+	TypeLicenseIssued     = "license.issued"      // v1
+	TypeLicenseUpdated    = "license.updated"     // v1
+	TypeLicenseSuspended  = "license.suspended"   // v1
+	TypeLicenseReinstated = "license.reinstated"  // v1
+	TypeLicenseDemerit    = "license.demerit"     // v1
+
+	TypeProviderHealth   = "provider.health"      // v1
+	TypeEvidenceCaptured = "evidence.captured"    // v1
+	TypeEvidenceVerified = "evidence.verified"    // v1
 
 	TypeUserLoggedIn    = "user.logged_in"     // v1
 	TypeUserLoggedOut   = "user.logged_out"    // v1
@@ -78,4 +90,52 @@ type AnprScanPayload struct {
 	GeoLat           float64 `json:"geo_lat"`
 	GeoLng           float64 `json:"geo_lng"`
 	MatchedVehicleID string  `json:"matched_vehicle_id,omitempty"`
+}
+
+type AnprAlertPayload struct {
+	ScanID    string `json:"scan_id"`
+	Plate     string `json:"plate"`
+	VehicleID string `json:"vehicle_id"`
+	IsStolen  bool   `json:"is_stolen"`
+	IsSeized  bool   `json:"is_seized"`
+	IsWanted  bool   `json:"is_wanted"`
+}
+
+type LicenseIssuedPayload struct {
+	LicenseID     string   `json:"license_id"`
+	LicenseNumber string   `json:"license_number"`
+	UserID        string   `json:"user_id,omitempty"`
+	Classes       []string `json:"classes"`
+}
+
+type LicenseSuspendedPayload struct {
+	LicenseID    string `json:"license_id"`
+	Reason       string `json:"reason"`
+	TriggerKind  string `json:"trigger_kind"`
+	StartsAt     string `json:"starts_at"`
+	EndsAt       string `json:"ends_at,omitempty"`
+}
+
+type LicenseDemeritPayload struct {
+	LicenseID    string `json:"license_id"`
+	Delta        int    `json:"delta"`
+	Reason       string `json:"reason"`
+	Source       string `json:"source"`
+	SourceID     string `json:"source_id,omitempty"`
+	NewTotal     int    `json:"new_total"`
+}
+
+type ProviderHealthPayload struct {
+	Module    string `json:"module"`
+	Provider  string `json:"provider"`
+	State     string `json:"state"`     // ok|degraded|down
+	Streak    int    `json:"streak"`
+}
+
+type EvidenceCapturedPayload struct {
+	EvidenceID string `json:"evidence_id"`
+	FineID     string `json:"fine_id"`
+	S3Key      string `json:"s3_key"`
+	SHA256     string `json:"sha256"`
+	Bytes      int64  `json:"bytes"`
 }

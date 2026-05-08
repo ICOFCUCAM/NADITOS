@@ -26,7 +26,7 @@ type storedObj struct {
 
 func NewDevStub() *DevStub { return &DevStub{obj: map[string]*storedObj{}} }
 
-func (DevStub) Info() contracts.AdapterInfo {
+func (*DevStub) Info() contracts.AdapterInfo {
 	return contracts.AdapterInfo{Module: "storage", Provider: "dev-stub"}
 }
 

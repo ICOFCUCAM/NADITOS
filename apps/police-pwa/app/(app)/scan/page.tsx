@@ -124,10 +124,26 @@ export default function ScanPage() {
               {vehicle.is_wanted && "WANTED"}
             </div>
           )}
+
+          {/* Suggested offences derived from compliance state. The officer
+              still selects which to charge; the server computes the amount. */}
+          {suggestedOffences(vehicle).length > 0 && (
+            <div className="space-y-1.5 pt-1">
+              <div className="text-xs uppercase tracking-wide text-slate-400">Suggested offences</div>
+              {suggestedOffences(vehicle).map((o) => (
+                <button key={o.code}
+                  onClick={() => router.push(`/fine?plate=${encodeURIComponent(vehicle.plate)}&vid=${vehicle.id}&offence=${o.code}`)}
+                  className="w-full text-left px-3 py-2 rounded bg-amber-500/15 border border-amber-500/30 text-amber-100 hover:bg-amber-500/25 text-sm">
+                  <span className="font-mono text-xs text-amber-300">{o.code}</span> · {o.label}
+                </button>
+              ))}
+            </div>
+          )}
+
           <Button
             onClick={() => router.push(`/fine?plate=${encodeURIComponent(vehicle.plate)}&vid=${vehicle.id}`)}
-            className="w-full bg-red-600 hover:bg-red-700">
-            Issue fine
+            className="w-full bg-red-600 hover:bg-red-700 mt-2">
+            Issue fine (free choice)
           </Button>
         </div>
       )}
@@ -135,4 +151,22 @@ export default function ScanPage() {
   );
 }
 
-function date(s?: string | null) { return s ? new Date(s).toISOString().slice(0,10) : "—"; }
+function date(s?: string | null) { return s ? new Date(s).toISOString().slice(0, 10) : "—"; }
+
+// Compliance-driven offence suggestions for the officer. The fines
+// service computes the actual amount from the active country pack; the
+// officer cannot override.
+function suggestedOffences(v: Vehicle): { code: string; label: string }[] {
+  const out: { code: string; label: string }[] = [];
+  const now = Date.now();
+  if (v.is_stolen || v.is_seized || v.is_wanted) {
+    out.push({ code: "STOLEN", label: "Vehicle on alert list — detain & call dispatch" });
+  }
+  if (!v.insurance_expires_at || new Date(v.insurance_expires_at).getTime() < now) {
+    out.push({ code: "INS_EXPIRED", label: "Driving without valid insurance" });
+  }
+  if (!v.inspection_expires_at || new Date(v.inspection_expires_at).getTime() < now) {
+    out.push({ code: "INSP_EXPIRED", label: "Driving without valid roadworthiness inspection" });
+  }
+  return out;
+}

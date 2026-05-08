@@ -1,0 +1,222 @@
+// Package api wires the ANPR gateway's HTTP surface.
+package api
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/icofcucam/naditos/packages/go-common/auth"
+	"github.com/icofcucam/naditos/packages/go-common/config"
+	"github.com/icofcucam/naditos/packages/go-common/db"
+	"github.com/icofcucam/naditos/packages/go-common/httpx"
+)
+
+type API struct {
+	cfg    config.Service
+	log    *slog.Logger
+	pool   *pgxpool.Pool
+	issuer *auth.Issuer
+}
+
+func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool, issuer *auth.Issuer) http.Handler {
+	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer}
+	mux := http.NewServeMux()
+
+	// Single-scan ingest. Officer devices and edge cameras hit this in
+	// real time. The handler ENQUEUES — it never blocks on matching.
+	mux.Handle("POST /v1/anpr/scans",
+		issuer.Middleware(auth.RequirePermission("anpr:scan")(http.HandlerFunc(a.enqueue))))
+
+	// Batch ingest for offline reconciliation: a police PWA that lost
+	// connectivity replays its queue when it comes back online.
+	mux.Handle("POST /v1/anpr/scans:batch",
+		issuer.Middleware(auth.RequirePermission("anpr:scan")(http.HandlerFunc(a.enqueueBatch))))
+
+	// Job status — clients poll for the resolved scan + match.
+	mux.Handle("GET /v1/anpr/jobs/{id}",
+		issuer.Middleware(auth.RequirePermission("anpr:scan")(http.HandlerFunc(a.jobStatus))))
+
+	// Recent scans — for officer feed.
+	mux.Handle("GET /v1/anpr/scans",
+		issuer.Middleware(auth.RequirePermission("anpr:scan")(http.HandlerFunc(a.listScans))))
+
+	return mux
+}
+
+// ─── DTO ────────────────────────────────────────────────────────────────────
+type scanIn struct {
+	Plate      string    `json:"plate"`
+	Confidence float32   `json:"confidence"`
+	Source     string    `json:"source"`         // officer|fixed_cam|toll|border|highway
+	SourceID   string    `json:"source_id"`
+	GeoLat     float64   `json:"geo_lat"`
+	GeoLng     float64   `json:"geo_lng"`
+	ImageS3Key string    `json:"image_s3_key"`
+	CapturedAt time.Time `json:"captured_at"`
+}
+
+// ─── Handlers ───────────────────────────────────────────────────────────────
+func (a *API) enqueue(w http.ResponseWriter, r *http.Request) {
+	var in scanIn
+	if err := httpx.ReadJSON(r, &in); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	id, err := a.enqueueOne(r.Context(), in)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
+		"job_id": id, "status": "queued",
+	})
+}
+
+func (a *API) enqueueBatch(w http.ResponseWriter, r *http.Request) {
+	type req struct{ Items []scanIn `json:"items"` }
+	var in req
+	if err := httpx.ReadJSON(r, &in); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	if len(in.Items) == 0 || len(in.Items) > 1000 {
+		httpx.WriteErr(w, httpx.Err(400, "batch_size", "items must be 1..1000"))
+		return
+	}
+	ids := make([]uuid.UUID, 0, len(in.Items))
+	for _, it := range in.Items {
+		id, err := a.enqueueOne(r.Context(), it)
+		if err != nil {
+			a.log.Warn("anpr batch item failed", "err", err)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
+		"accepted": len(ids), "job_ids": ids,
+	})
+}
+
+func (a *API) enqueueOne(ctx context.Context, in scanIn) (uuid.UUID, error) {
+	c := auth.ClaimsFrom(ctx)
+	if c == nil {
+		return uuid.Nil, httpx.ErrUnauthorized
+	}
+	if in.Plate == "" {
+		return uuid.Nil, httpx.Err(400, "plate_required", "plate is required")
+	}
+	if in.CapturedAt.IsZero() {
+		in.CapturedAt = time.Now().UTC()
+	}
+	conn, err := db.WithTenant(ctx, a.pool)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer conn.Release()
+	var id uuid.UUID
+	err = conn.QueryRow(ctx,
+		`INSERT INTO anpr_jobs
+		   (tenant_id, source, source_id, raw_plate, confidence,
+		    geo_lat, geo_lng, image_s3_key, captured_at)
+		 VALUES ($1,$2, NULLIF($3,''),$4,$5,$6,$7, NULLIF($8,''),$9)
+		 RETURNING id`,
+		c.TenantID, in.Source, in.SourceID, in.Plate, in.Confidence,
+		nilIfZero(in.GeoLat), nilIfZero(in.GeoLng), in.ImageS3Key, in.CapturedAt).
+		Scan(&id)
+	return id, err
+}
+
+func (a *API) jobStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteErr(w, httpx.ErrBadRequest)
+		return
+	}
+	conn, err := db.WithTenant(r.Context(), a.pool)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer conn.Release()
+
+	type out struct {
+		ID               uuid.UUID  `json:"id"`
+		Status           string     `json:"status"`
+		NormalizedPlate  *string    `json:"normalized_plate,omitempty"`
+		Confidence       float32    `json:"confidence"`
+		Attempts         int        `json:"attempts"`
+		LastError        *string    `json:"last_error,omitempty"`
+		ScanID           *uuid.UUID `json:"scan_id,omitempty"`
+		MatchedVehicleID *uuid.UUID `json:"matched_vehicle_id,omitempty"`
+		EnqueuedAt       time.Time  `json:"enqueued_at"`
+		ProcessedAt      *time.Time `json:"processed_at,omitempty"`
+	}
+	var o out
+	err = conn.QueryRow(r.Context(),
+		`SELECT j.id, j.status::text, j.normalized_plate, j.confidence, j.attempts,
+		        j.last_error, j.scan_id, s.matched_vehicle_id, j.enqueued_at, j.processed_at
+		   FROM anpr_jobs j
+		   LEFT JOIN anpr_scans s ON s.id = j.scan_id
+		  WHERE j.id=$1`, id).
+		Scan(&o.ID, &o.Status, &o.NormalizedPlate, &o.Confidence, &o.Attempts,
+			&o.LastError, &o.ScanID, &o.MatchedVehicleID, &o.EnqueuedAt, &o.ProcessedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.WriteErr(w, httpx.ErrNotFound)
+		return
+	}
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, o)
+}
+
+func (a *API) listScans(w http.ResponseWriter, r *http.Request) {
+	conn, err := db.WithTenant(r.Context(), a.pool)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer conn.Release()
+	rows, err := conn.Query(r.Context(),
+		`SELECT id, plate_read, confidence, source, captured_at,
+		        geo_lat, geo_lng, matched_vehicle_id
+		   FROM anpr_scans ORDER BY captured_at DESC LIMIT 100`)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer rows.Close()
+	type row struct {
+		ID               uuid.UUID  `json:"id"`
+		Plate            string     `json:"plate"`
+		Confidence       float32    `json:"confidence"`
+		Source           string     `json:"source"`
+		CapturedAt       time.Time  `json:"captured_at"`
+		GeoLat           *float64   `json:"geo_lat"`
+		GeoLng           *float64   `json:"geo_lng"`
+		MatchedVehicleID *uuid.UUID `json:"matched_vehicle_id"`
+	}
+	out := []row{}
+	for rows.Next() {
+		var it row
+		_ = rows.Scan(&it.ID, &it.Plate, &it.Confidence, &it.Source, &it.CapturedAt,
+			&it.GeoLat, &it.GeoLng, &it.MatchedVehicleID)
+		out = append(out, it)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+func nilIfZero(f float64) any {
+	if f == 0 {
+		return nil
+	}
+	return f
+}

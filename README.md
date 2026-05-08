@@ -16,11 +16,11 @@ enforcement, and fine management.
 | --------------------- | ---------------- | ----------- |
 | Authentication & RBAC | `auth`           | implemented |
 | Vehicle Registry      | `registry`       | implemented |
-| Driver License        | `license`        | scaffold    |
-| Insurance Verification| `insurance`      | scaffold    |
-| Roadworthiness        | `inspection`     | scaffold    |
+| Driver License        | `license`        | implemented |
+| Insurance Verification| `insurance`      | implemented |
+| Roadworthiness        | `inspection`     | implemented |
 | Digital Fines         | `fines`          | implemented |
-| ANPR Gateway          | `anpr-gateway`   | scaffold    |
+| ANPR Gateway          | `anpr-gateway`   | implemented |
 | Audit Log             | `audit`          | implemented |
 | Notifications         | `notifications`  | scaffold    |
 | API gateway           | `gateway`        | implemented |

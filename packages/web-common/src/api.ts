@@ -63,10 +63,12 @@ export async function apiFetch<T>(path: string, opts: FetchOpts = {}): Promise<T
 // Per-service convenience wrappers — each app uses the gateway URL in prod,
 // but in dev points at the individual service ports.
 export const services = {
-  auth:     (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_AUTH_BASE     ?? DEFAULT_BASE }),
-  registry: (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_REGISTRY_BASE ?? DEFAULT_BASE }),
-  fines:    (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_FINES_BASE    ?? DEFAULT_BASE }),
-  audit:    (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_AUDIT_BASE    ?? DEFAULT_BASE }),
-  license:  (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_LICENSE_BASE  ?? DEFAULT_BASE }),
-  anpr:     (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_ANPR_BASE     ?? DEFAULT_BASE }),
+  auth:       (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_AUTH_BASE       ?? DEFAULT_BASE }),
+  registry:   (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_REGISTRY_BASE   ?? DEFAULT_BASE }),
+  fines:      (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_FINES_BASE      ?? DEFAULT_BASE }),
+  audit:      (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_AUDIT_BASE      ?? DEFAULT_BASE }),
+  license:    (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_LICENSE_BASE    ?? DEFAULT_BASE }),
+  anpr:       (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_ANPR_BASE       ?? DEFAULT_BASE }),
+  insurance:  (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_INSURANCE_BASE  ?? DEFAULT_BASE }),
+  inspection: (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_INSPECTION_BASE ?? DEFAULT_BASE }),
 };

@@ -1,0 +1,18 @@
+DROP VIEW  IF EXISTS v_driver_standing;
+DROP TABLE IF EXISTS event_outbox CASCADE;
+DROP TABLE IF EXISTS officer_daily_stats CASCADE;
+DROP TABLE IF EXISTS tenant_country_pack CASCADE;
+DROP TABLE IF EXISTS country_packs CASCADE;
+DROP TABLE IF EXISTS evidence_retention_policy CASCADE;
+DROP TABLE IF EXISTS evidence_custody CASCADE;
+DROP TABLE IF EXISTS retry_jobs CASCADE;
+DROP TYPE  IF EXISTS retry_job_status;
+DROP TABLE IF EXISTS provider_health CASCADE;
+DROP TABLE IF EXISTS anpr_jobs CASCADE;
+DROP TYPE  IF EXISTS anpr_job_status;
+DROP TABLE IF EXISTS driver_biometrics CASCADE;
+DROP TABLE IF EXISTS driver_demerit_policy CASCADE;
+DROP TABLE IF EXISTS driver_demerit_events CASCADE;
+DROP TABLE IF EXISTS driver_suspensions CASCADE;
+DROP TABLE IF EXISTS driver_violations CASCADE;
+DROP TABLE IF EXISTS driver_endorsements CASCADE;

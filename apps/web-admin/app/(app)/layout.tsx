@@ -8,7 +8,10 @@ import { useSession } from "@naditos/web-common";
 const NAV = [
   { href: "/",         label: "Dashboard" },
   { href: "/vehicles", label: "Vehicles" },
+  { href: "/licenses", label: "Driver licenses" },
   { href: "/fines",    label: "Fines" },
+  { href: "/anpr",     label: "ANPR feed" },
+  { href: "/providers", label: "Provider health" },
   { href: "/audit",    label: "Audit" },
 ];
 

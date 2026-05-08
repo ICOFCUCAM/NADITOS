@@ -422,6 +422,11 @@ BEGIN
 END $$;
 
 -- A super-role bypass for migration/admin scripts (DB role only, never JWT)
-CREATE ROLE naditos_admin NOINHERIT;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='naditos_admin') THEN
+    CREATE ROLE naditos_admin NOINHERIT;
+    EXECUTE 'ALTER ROLE naditos_admin SET row_security = off';
+  END IF;
+END $$;
 GRANT ALL ON ALL TABLES IN SCHEMA public TO naditos_admin;
-ALTER ROLE naditos_admin SET row_security = off;

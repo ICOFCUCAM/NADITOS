@@ -1,0 +1,391 @@
+openapi: 3.1.0
+info:
+  title: NADITOS API
+  description: |
+    National Digital Transport Operating System — public HTTP API.
+
+    Every request flows through the API gateway, which:
+      - injects an `X-Request-Id` header,
+      - verifies the bearer JWT for protected routes,
+      - enforces per-route role gates and per-(tenant, route) rate limits.
+
+    Tenant identity is carried in the JWT claim `tid`. Clients may send
+    `X-Tenant-Id` for routes that don't require auth (login); for
+    authenticated routes the gateway rejects mismatches.
+  version: 1.0.0
+servers:
+  - url: https://api.naditos.example
+    description: Production gateway
+  - url: http://localhost:8080
+    description: Local docker-compose
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    TenantHeader:
+      name: X-Tenant-Id
+      in: header
+      schema: { type: string }
+      description: Required for the login endpoint; ignored elsewhere (set from JWT).
+  schemas:
+    Error:
+      type: object
+      properties:
+        code:    { type: string }
+        message: { type: string }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:    { type: string, format: email }
+        password: { type: string }
+        tenant:   { type: string }
+    TokenResponse:
+      type: object
+      properties:
+        access_token:  { type: string }
+        refresh_token: { type: string }
+        expires_at:    { type: string, format: date-time }
+        user:
+          type: object
+          properties:
+            id:          { type: string, format: uuid }
+            tenant:      { type: string }
+            email:       { type: string }
+            full_name:   { type: string }
+            role:        { type: string }
+            permissions:
+              type: array
+              items: { type: string }
+    Vehicle:
+      type: object
+      properties:
+        id:                       { type: string, format: uuid }
+        plate:                    { type: string }
+        vin:                      { type: string, nullable: true }
+        make:                     { type: string, nullable: true }
+        model:                    { type: string, nullable: true }
+        year:                     { type: integer, nullable: true }
+        category:                 { type: string, nullable: true }
+        owner_id:                 { type: string, format: uuid, nullable: true }
+        registration_expires_at:  { type: string, format: date-time, nullable: true }
+        insurance_expires_at:     { type: string, format: date-time, nullable: true }
+        inspection_expires_at:    { type: string, format: date-time, nullable: true }
+        is_stolen:                { type: boolean }
+        is_seized:                { type: boolean }
+        is_wanted:                { type: boolean }
+        status:
+          type: string
+          enum: [green, yellow, red, black]
+    EvidenceIn:
+      type: object
+      required: [kind, s3_key, sha256, bytes, taken_at]
+      properties:
+        kind:    { type: string, enum: [photo, video, signature, document] }
+        s3_key:  { type: string }
+        sha256:  { type: string }
+        bytes:   { type: integer, format: int64 }
+        taken_at: { type: string, format: date-time }
+    FineIssueRequest:
+      type: object
+      required: [plate, offence_code, evidence, geo_lat, geo_lng, device_id]
+      properties:
+        plate:           { type: string }
+        offence_code:    { type: string }
+        driver_license:  { type: string, nullable: true }
+        geo_lat:         { type: number, format: double }
+        geo_lng:         { type: number, format: double }
+        geo_accuracy_m:  { type: number, format: float }
+        device_id:       { type: string }
+        notes:           { type: string }
+        evidence:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/EvidenceIn" }
+    Fine:
+      type: object
+      properties:
+        id:           { type: string, format: uuid }
+        plate:        { type: string }
+        offence_code: { type: string }
+        amount:       { type: string, description: "decimal as string" }
+        currency:     { type: string }
+        status:
+          type: string
+          enum: [issued, warned, overdue, paid, disputed, escalated, seized, court, cancelled]
+        issued_at:    { type: string, format: date-time }
+        due_at:       { type: string, format: date-time }
+        issued_by:    { type: string, format: uuid }
+    AnprScanRequest:
+      type: object
+      required: [plate, source]
+      properties:
+        plate:        { type: string }
+        confidence:   { type: number, format: float }
+        source:       { type: string, enum: [officer, fixed_cam, toll, border, highway] }
+        source_id:    { type: string }
+        geo_lat:      { type: number, format: double }
+        geo_lng:      { type: number, format: double }
+        image_s3_key: { type: string }
+        captured_at:  { type: string, format: date-time }
+    LicenseStanding:
+      type: object
+      properties:
+        license:
+          $ref: "#/components/schemas/License"
+        standing:
+          type: string
+          enum: [good, expiring_soon, at_risk, expired, suspended]
+        recent_violations:           { type: integer }
+        next_suspension_threshold:   { type: integer }
+    License:
+      type: object
+      properties:
+        id:               { type: string, format: uuid }
+        license_number:   { type: string }
+        full_name:        { type: string }
+        classes:
+          type: array
+          items: { type: string }
+        issued_at:        { type: string, nullable: true }
+        expires_at:       { type: string, nullable: true }
+        points:           { type: integer }
+        is_suspended:     { type: boolean }
+        suspended_until:  { type: string, nullable: true }
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ─── Auth ───────────────────────────────────────────────────────────────
+  /v1/auth/login:
+    post:
+      summary: Sign in (rate-limited 60/min/tenant)
+      security: []
+      parameters: [{ $ref: "#/components/parameters/TenantHeader" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/LoginRequest" } } }
+      responses:
+        '200': { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/TokenResponse" } } } }
+        '401': { description: unauthorized }
+  /v1/auth/refresh:
+    post:
+      summary: Exchange a refresh_token for a new access_token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties: { refresh_token: { type: string } }
+      responses:
+        '200': { description: ok }
+        '401': { description: unauthorized }
+  /v1/auth/me:
+    get:
+      summary: Current session
+      responses: { '200': { description: ok } }
+
+  # ─── Vehicles (registry) ────────────────────────────────────────────────
+  /v1/vehicles:
+    get:
+      summary: List / search vehicles
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: "plate or VIN substring" }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Vehicle" }
+    post:
+      summary: Create a vehicle
+      responses:
+        '201': { description: created }
+  /v1/vehicles/by-plate/{plate}:
+    get:
+      summary: Lookup by plate (police real-time check)
+      parameters: [{ name: plate, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Vehicle" } } } }
+        '404': { description: not found }
+  /v1/vehicles/{id}:
+    get: { summary: Get a vehicle, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '200': { description: ok }, '404': { description: not found } } }
+    patch: { summary: Update a vehicle, parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }], responses: { '204': { description: no content } } }
+  /v1/vehicles/{id}/flags:
+    post:
+      summary: Flag vehicle stolen / seized / wanted
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '204': { description: no content } }
+
+  # ─── Fines ──────────────────────────────────────────────────────────────
+  /v1/fines:
+    get:
+      summary: List recent fines (tenant-scoped)
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Fine" }
+    post:
+      summary: Issue a fine — anti-corruption gates apply
+      description: |
+        Officer cannot set the amount — server reads
+        `regulation_offences.base_amount` for the active country pack.
+        Evidence (>=1 photo with sha256, taken_at) is REQUIRED.
+        Duplicates within the offence's `duplicate_window_min` for the
+        same `vehicle_id × offence_code` are rejected.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/FineIssueRequest" } } }
+      responses:
+        '201': { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Fine" } } } }
+        '400': { description: missing evidence, unknown offence, etc. }
+        '409': { description: duplicate fine within window }
+  /v1/fines/mine:
+    get:
+      summary: Citizen self-service list
+      responses: { '200': { description: ok } }
+  /v1/fines/{id}:
+    get:
+      summary: Fine + evidence + custody chain
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { description: ok }, '404': { description: not found } }
+  /v1/fines/{id}/pay:
+    post:
+      summary: Initiate payment via the configured provider
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200':
+          description: payment intent created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  intent_id:     { type: string }
+                  client_secret: { type: string }
+                  status:        { type: string }
+  /v1/fines/{id}/dispute:
+    post: { summary: File a dispute, responses: { '201': { description: created } } }
+  /v1/fines/{id}/cancel:
+    post: { summary: Admin cancellation (audit-logged), responses: { '204': { description: no content } } }
+
+  # ─── ANPR ───────────────────────────────────────────────────────────────
+  /v1/anpr/scans:
+    post:
+      summary: Enqueue a scan for async processing
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AnprScanRequest" } } }
+      responses:
+        '202':
+          description: queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: { type: string, format: uuid }
+                  status: { type: string }
+    get:
+      summary: Recent canonical scans
+      responses: { '200': { description: ok } }
+  /v1/anpr/scans:batch:
+    post:
+      summary: Offline reconciliation — replay queued scans
+      responses: { '202': { description: queued } }
+  /v1/anpr/jobs/{id}:
+    get:
+      summary: Poll job status
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:                 { type: string, format: uuid }
+                  status:             { type: string, enum: [queued, processing, done, failed, duplicate] }
+                  normalized_plate:   { type: string }
+                  matched_vehicle_id: { type: string, format: uuid, nullable: true }
+
+  # ─── Licenses ───────────────────────────────────────────────────────────
+  /v1/licenses:
+    post: { summary: Issue a driver license, responses: { '201': { description: created } } }
+  /v1/licenses/by-number/{n}:
+    get: { summary: Lookup by license number, parameters: [{ name: n, in: path, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+  /v1/licenses/{id}/standing:
+    get:
+      summary: Live driver standing (good/at_risk/suspended/...)
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200':
+          description: ok
+          content: { application/json: { schema: { $ref: "#/components/schemas/LicenseStanding" } } }
+  /v1/licenses/{id}/issue-token:
+    post: { summary: Issue a 5-minute QR/NFC verify bundle, responses: { '200': { description: ok } } }
+  /v1/licenses/verify:
+    post:
+      summary: Officer verifies a citizen's QR/NFC bundle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties: { token: { type: string } }
+      responses: { '200': { description: ok } }
+  /v1/licenses/{id}/suspensions:
+    post: { summary: Open a suspension, responses: { '201': { description: created } } }
+  /v1/licenses/{id}/biometrics:
+    post: { summary: Register biometric template ref (HSM-backed), responses: { '204': { description: no content } } }
+
+  # ─── Insurance / Inspection ─────────────────────────────────────────────
+  /v1/insurance/verify:
+    get:
+      summary: Online verification via the active provider
+      parameters:
+        - { name: plate, in: query, schema: { type: string } }
+        - { name: vin, in: query, schema: { type: string } }
+      responses: { '200': { description: ok } }
+  /v1/insurance/reconcile:
+    post: { summary: Admin trigger — enqueue verifies for stale vehicles, responses: { '202': { description: queued } } }
+  /v1/inspection/verify:
+    get:
+      summary: Online roadworthiness verification
+      parameters: [{ name: plate, in: query, schema: { type: string } }]
+      responses: { '200': { description: ok } }
+
+  # ─── Audit ──────────────────────────────────────────────────────────────
+  /v1/audit/events:
+    get:
+      summary: List recent audit events for a tenant
+      parameters: [{ name: tenant_id, in: query, schema: { type: string } }]
+      responses: { '200': { description: ok } }
+  /v1/audit/verify:
+    get:
+      summary: Verify the hash chain for a tenant
+      parameters: [{ name: tenant_id, in: query, schema: { type: string } }]
+      responses: { '200': { description: ok } }
