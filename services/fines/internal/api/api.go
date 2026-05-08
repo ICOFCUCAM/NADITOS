@@ -98,15 +98,16 @@ type issueReq struct {
 }
 
 type fineOut struct {
-	ID          uuid.UUID  `json:"id"`
-	Plate       string     `json:"plate"`
-	OffenceCode string     `json:"offence_code"`
-	Amount      string     `json:"amount"`
-	Currency    string     `json:"currency"`
-	Status      string     `json:"status"`
-	IssuedAt    time.Time  `json:"issued_at"`
-	DueAt       time.Time  `json:"due_at"`
-	IssuedBy    uuid.UUID  `json:"issued_by"`
+	ID              uuid.UUID `json:"id"`
+	Plate           string    `json:"plate"`
+	OffenceCode     string    `json:"offence_code"`
+	Amount          string    `json:"amount"`
+	Currency        string    `json:"currency"`
+	Status          string    `json:"status"`
+	IssuedAt        time.Time `json:"issued_at"`
+	DueAt           time.Time `json:"due_at"`
+	IssuedBy        uuid.UUID `json:"issued_by"`
+	EscalationStage int       `json:"escalation_stage"`
 }
 
 // ─── ISSUE ─────────────────────────────────────────────────────────────────
@@ -325,7 +326,7 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	defer conn.Release()
 	rows, err := conn.Query(r.Context(),
 		`SELECT id, plate, offence_code, amount::text, currency,
-		        status::text, issued_at, due_at, issued_by
+		        status::text, issued_at, due_at, issued_by, escalation_stage
 		   FROM fines
 		  ORDER BY issued_at DESC LIMIT 100`)
 	if err != nil {
@@ -337,7 +338,7 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var f fineOut
 		if err := rows.Scan(&f.ID, &f.Plate, &f.OffenceCode, &f.Amount, &f.Currency,
-			&f.Status, &f.IssuedAt, &f.DueAt, &f.IssuedBy); err != nil {
+			&f.Status, &f.IssuedAt, &f.DueAt, &f.IssuedBy, &f.EscalationStage); err != nil {
 			httpx.WriteErr(w, err)
 			return
 		}
@@ -356,7 +357,8 @@ func (a *API) listMine(w http.ResponseWriter, r *http.Request) {
 	defer conn.Release()
 	rows, err := conn.Query(r.Context(),
 		`SELECT f.id, f.plate, f.offence_code, f.amount::text, f.currency,
-		        f.status::text, f.issued_at, f.due_at, f.issued_by
+		        f.status::text, f.issued_at, f.due_at, f.issued_by,
+		        f.escalation_stage
 		   FROM fines f
 		   LEFT JOIN vehicles v ON v.id = f.vehicle_id
 		   LEFT JOIN owners   o ON o.id = v.owner_id
@@ -372,7 +374,7 @@ func (a *API) listMine(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var f fineOut
 		if err := rows.Scan(&f.ID, &f.Plate, &f.OffenceCode, &f.Amount, &f.Currency,
-			&f.Status, &f.IssuedAt, &f.DueAt, &f.IssuedBy); err != nil {
+			&f.Status, &f.IssuedAt, &f.DueAt, &f.IssuedBy, &f.EscalationStage); err != nil {
 			httpx.WriteErr(w, err)
 			return
 		}
@@ -396,10 +398,10 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	var f fineOut
 	err = conn.QueryRow(r.Context(),
 		`SELECT id, plate, offence_code, amount::text, currency,
-		        status::text, issued_at, due_at, issued_by
+		        status::text, issued_at, due_at, issued_by, escalation_stage
 		   FROM fines WHERE id=$1`, id).
 		Scan(&f.ID, &f.Plate, &f.OffenceCode, &f.Amount, &f.Currency,
-			&f.Status, &f.IssuedAt, &f.DueAt, &f.IssuedBy)
+			&f.Status, &f.IssuedAt, &f.DueAt, &f.IssuedBy, &f.EscalationStage)
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.WriteErr(w, httpx.ErrNotFound)
 		return
@@ -606,6 +608,38 @@ func (a *API) dispute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+
+	// Ownership + status gate. Citizens can only dispute fines they own
+	// (vehicle owner OR listed driver) and only while the fine is still
+	// open. Admin/court staff disputing on a citizen's behalf is
+	// out-of-scope — that path goes through fine_disputes directly.
+	var status, ownerOK string
+	err = tx.QueryRow(r.Context(),
+		`SELECT f.status::text,
+		        CASE WHEN o.user_id = $2 OR f.driver_user_id = $2
+		             THEN 'yes' ELSE 'no' END
+		   FROM fines f
+		   LEFT JOIN vehicles v ON v.id = f.vehicle_id
+		   LEFT JOIN owners   o ON o.id = v.owner_id
+		  WHERE f.id = $1`, id, c.Subject).Scan(&status, &ownerOK)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.WriteErr(w, httpx.ErrNotFound)
+		return
+	}
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	if ownerOK != "yes" {
+		httpx.WriteErr(w, httpx.ErrForbidden)
+		return
+	}
+	if status == "paid" || status == "cancelled" || status == "disputed" {
+		httpx.WriteErr(w, httpx.Err(http.StatusConflict, "not_disputable",
+			"fine is "+status+"; can no longer be disputed"))
+		return
+	}
+
 	if _, err := tx.Exec(r.Context(),
 		`INSERT INTO fine_disputes (fine_id, filed_by, reason)
 		 VALUES ($1,$2,$3)`, id, c.Subject, in.Reason); err != nil {

@@ -632,6 +632,116 @@ func TestFineIssue_CustodyRollsBackOnDuplicate(t *testing.T) {
 	}
 }
 
+// linkVehicleToCitizen attaches the vehicle to an owner record whose
+// user_id matches the citizen behind the supplied token. Mirrors the
+// /v1/owners/me/claim flow used by the citizen portal but without
+// going through HTTP — these tests exercise the dispute gate, not the
+// claim flow.
+func linkVehicleToCitizen(t *testing.T, env *testkit.Env, plate, citizenID string) {
+	t.Helper()
+	ownerID := uuid.New()
+	env.Exec(`INSERT INTO owners (id, tenant_id, user_id, full_name)
+	          VALUES ($1, $2, $3::uuid, 'Test owner')`,
+		ownerID, env.Tenant, citizenID)
+	env.Exec(`UPDATE vehicles SET owner_id=$1
+	          WHERE tenant_id=$2 AND plate=$3`,
+		ownerID, env.Tenant, plate)
+}
+
+// TestDispute_OwnerOnly: a citizen with no link to the vehicle cannot
+// dispute the fine — even with a valid JWT for the same tenant. The
+// previous handler treated the JWT alone as authorization.
+func TestDispute_OwnerOnly(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	officerTok, _ := env.Token("officer", "fines:create")
+	otherTok, _ := env.Token("citizen") // not the owner
+
+	h := build(env)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("issue: %d %s", rec.Code, rec.Body.String())
+	}
+	var issued struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines/"+issued.ID+"/dispute",
+		`{"reason":"not me"}`, otherTok))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-owner dispute: want 403, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDispute_OwnerSucceedsAndStatusChanges: when the linked owner
+// disputes their own fine, the handler must accept the call (201)
+// AND flip fines.status to 'disputed' — the smoke depends on this
+// for the disputed-fine path.
+func TestDispute_OwnerSucceedsAndStatusChanges(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	officerTok, _ := env.Token("officer", "fines:create")
+	citizenTok, citizenID := env.Token("citizen")
+	linkVehicleToCitizen(t, env, plate, citizenID)
+
+	h := build(env)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	var issued struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines/"+issued.ID+"/dispute",
+		`{"reason":"camera misread the plate"}`, citizenTok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("dispute: want 201, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	var status string
+	if err := env.QueryRow(
+		`SELECT status::text FROM fines WHERE id=$1`, issued.ID).
+		Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "disputed" {
+		t.Fatalf("status: want disputed, got %s", status)
+	}
+}
+
+// TestDispute_ClosedFinesRejected: a paid / cancelled / already-disputed
+// fine cannot be re-disputed (409). Otherwise a citizen could re-open
+// status='paid' and trigger downstream events the demerit / payment
+// reconciler doesn't expect.
+func TestDispute_ClosedFinesRejected(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	officerTok, _ := env.Token("officer", "fines:create")
+	citizenTok, citizenID := env.Token("citizen")
+	linkVehicleToCitizen(t, env, plate, citizenID)
+
+	h := build(env)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	var issued struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
+
+	// Force-paid via fixture (we don't want to depend on the dev-stub
+	// pay path here).
+	env.Exec(`UPDATE fines SET status='paid', paid_at=now() WHERE id=$1`,
+		issued.ID)
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines/"+issued.ID+"/dispute",
+		`{"reason":"changed my mind"}`, citizenTok))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("dispute on paid: want 409, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestPaymentsHealth_RecordsOK: a successful pay call against the
 // dev-stub provider must register an OK on the per-tenant
 // HealthMonitor, and GET /v1/fines/payments/health must surface it
