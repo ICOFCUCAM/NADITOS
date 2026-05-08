@@ -166,7 +166,7 @@ func (a *API) issue(w http.ResponseWriter, r *http.Request) {
 		err = tx.QueryRow(r.Context(),
 			`SELECT count(*) FROM fines
 			  WHERE vehicle_id=$1 AND offence_code=$2
-			    AND issued_at > now() - ($3 || ' minutes')::interval
+			    AND issued_at > now() - ($3::int * interval '1 minute')
 			    AND status NOT IN ('cancelled')`,
 			*vehicleID, in.OffenceCode, dupWindowMin).Scan(&dupCount)
 		if err != nil {

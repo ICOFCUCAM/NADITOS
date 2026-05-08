@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  go:
-    name: Go services
+  go-build:
+    name: Go build + vet
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,27 +32,9 @@ jobs:
           for s in services/*/; do
             (cd "$s" && go vet ./...)
           done
-      - name: go test
-        run: |
-          for s in services/*/; do
-            (cd "$s" && go test ./...)
-          done
 
-  web:
-    name: Next.js apps
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
-      - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: pnpm }
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm -r type-check
-      - run: pnpm -r build
-
-  schema:
-    name: SQL syntax
+  go-integration:
+    name: Go integration tests
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -69,9 +51,73 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
       - name: Apply migrations
         env:
           DATABASE_URL: postgres://naditos:naditos@localhost:5432/naditos?sslmode=disable
         run: |
           chmod +x scripts/migrate.sh
           ./scripts/migrate.sh up
+      - name: Provision app role (BYPASSRLS / non-bypass split)
+        env:
+          PGPASSWORD: naditos
+        run: |
+          psql -h localhost -U naditos -d naditos \
+            -f scripts/provision_test_role.sql
+      - name: Run integration tests
+        env:
+          TEST_DATABASE_URL: postgres://naditos:naditos@localhost:5432/naditos?sslmode=disable
+        run: |
+          for s in services/*/; do
+            (cd "$s" && go test ./... -count=1)
+          done
+
+  smoke:
+    name: End-to-end smoke
+    runs-on: ubuntu-latest
+    needs: go-build
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: naditos
+          POSTGRES_USER: naditos
+          POSTGRES_PASSWORD: naditos
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U naditos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+      - name: Provision app role
+        env:
+          PGPASSWORD: naditos
+        run: |
+          chmod +x scripts/migrate.sh scripts/smoke.sh
+          DATABASE_URL=postgres://naditos:naditos@localhost:5432/naditos?sslmode=disable \
+            ./scripts/migrate.sh up
+          psql -h localhost -U naditos -d naditos \
+            -f scripts/provision_test_role.sql
+      - name: Smoke run
+        env:
+          DATABASE_URL: postgres://naditos:naditos@localhost:5432/naditos?sslmode=disable
+          LOG_LEVEL: warn
+        run: ./scripts/smoke.sh
+
+  web:
+    name: Next.js apps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r type-check
+      - run: pnpm -r build

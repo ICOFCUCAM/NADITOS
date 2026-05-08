@@ -23,13 +23,20 @@ func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 }
 
 // Conn is an acquired connection with tenant context already applied.
-// Always Release() it when done.
+// Always Release() it when done — Release() resets the session vars so
+// the connection can be reused safely by another tenant's request.
 type Conn struct {
 	*pgxpool.Conn
+	ctx context.Context
 }
 
 // WithTenant acquires a connection and applies the caller's tenant/user/role
 // from the JWT claims as Postgres session variables.
+//
+// We use SET (session-level) rather than SET LOCAL because handlers don't
+// universally wrap their work in a transaction — SET LOCAL outside a tx
+// is a no-op and would silently disable RLS. To prevent leakage between
+// requests we RESET the vars in Conn.Release().
 func WithTenant(ctx context.Context, pool *pgxpool.Pool) (*Conn, error) {
 	c := auth.ClaimsFrom(ctx)
 	if c == nil {
@@ -40,14 +47,29 @@ func WithTenant(ctx context.Context, pool *pgxpool.Pool) (*Conn, error) {
 		return nil, err
 	}
 	if _, err := conn.Exec(ctx,
-		"SELECT set_config('app.tenant_id',$1,true), "+
-			"set_config('app.user_id',$2,true), "+
-			"set_config('app.role',$3,true)",
+		"SELECT set_config('app.tenant_id',$1,false), "+
+			"set_config('app.user_id',$2,false), "+
+			"set_config('app.role',$3,false)",
 		c.TenantID, c.Subject, c.Role); err != nil {
 		conn.Release()
 		return nil, err
 	}
-	return &Conn{conn}, nil
+	return &Conn{Conn: conn, ctx: ctx}, nil
+}
+
+// Release returns the connection to the pool after clearing the tenant
+// context so a subsequent acquire by another request starts clean.
+func (c *Conn) Release() {
+	if c == nil || c.Conn == nil {
+		return
+	}
+	// best-effort reset; if the underlying conn is already broken we
+	// release anyway — the pool discards broken conns.
+	_, _ = c.Conn.Exec(c.ctx,
+		"SELECT set_config('app.tenant_id','',false), "+
+			"set_config('app.user_id','',false), "+
+			"set_config('app.role','',false)")
+	c.Conn.Release()
 }
 
 // AsAdmin acquires a connection with row_security off — for migrations and

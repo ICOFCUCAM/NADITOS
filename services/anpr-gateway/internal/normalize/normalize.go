@@ -54,11 +54,16 @@ func Normalize(raw, plateRegex string) (string, error) {
 	return s, errors.New("plate does not match tenant regex")
 }
 
+// stripSeparators removes whitespace and "noise" punctuation an OCR
+// pipeline often inserts. Hyphens are *kept* — many countries (NL, BE,
+// DE prefixes) use them as part of the canonical plate. Vehicles are
+// stored with their canonical plate form, so dropping hyphens here
+// would silently break ANPR-to-registry matching.
 func stripSeparators(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch r {
-		case ' ', '-', '.', '_':
+		case ' ', '\t', '.', '_':
 			continue
 		}
 		b.WriteRune(r)

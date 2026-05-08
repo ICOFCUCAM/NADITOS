@@ -35,7 +35,7 @@ export default function LicensesPage() {
     setBusy(true);
     setErr(null);
     try {
-      const lic: any = await services.license(`/v1/licenses/by-number/${encodeURIComponent(q)}`, {
+      const lic: any = await services.license(`/v1/licenses?number=${encodeURIComponent(q)}`, {
         token: session.accessToken, tenant: session.user.tenant,
       });
       const standing: LicenseStanding = await services.license(`/v1/licenses/${lic.id}/standing`, {

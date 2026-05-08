@@ -332,9 +332,14 @@ paths:
 
   # ─── Licenses ───────────────────────────────────────────────────────────
   /v1/licenses:
-    post: { summary: Issue a driver license, responses: { '201': { description: created } } }
-  /v1/licenses/by-number/{n}:
-    get: { summary: Lookup by license number, parameters: [{ name: n, in: path, required: true, schema: { type: string } }], responses: { '200': { description: ok } } }
+    get:
+      summary: Search/lookup driver licenses (?number=DL-12345)
+      parameters:
+        - { name: number, in: query, schema: { type: string } }
+      responses: { '200': { description: ok } }
+    post:
+      summary: Issue a driver license
+      responses: { '201': { description: created } }
   /v1/licenses/{id}/standing:
     get:
       summary: Live driver standing (good/at_risk/suspended/...)

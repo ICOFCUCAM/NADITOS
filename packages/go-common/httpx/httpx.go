@@ -33,14 +33,23 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// DebugErrors, when true, includes the underlying error string in 500
+// responses. Test fixtures flip this on; production keeps it off so
+// internal details don't leak to clients.
+var DebugErrors = false
+
 func WriteErr(w http.ResponseWriter, err error) {
 	var e *Error
 	if errors.As(err, &e) {
 		WriteJSON(w, e.Status, e)
 		return
 	}
+	msg := "internal error"
+	if DebugErrors && err != nil {
+		msg = err.Error()
+	}
 	WriteJSON(w, http.StatusInternalServerError, &Error{
-		Code: "internal", Message: "internal error",
+		Code: "internal", Message: msg,
 	})
 }
 

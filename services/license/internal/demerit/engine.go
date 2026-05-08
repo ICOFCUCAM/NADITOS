@@ -118,7 +118,7 @@ func (e *Engine) applyForFine(ctx context.Context, tenantID, fineID string) erro
 	var newTotal int
 	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE(SUM(delta),0) FROM driver_demerit_events
-		   WHERE license_id=$1 AND occurred_at > now() - ($2 || ' months')::interval`,
+		   WHERE license_id=$1 AND occurred_at > now() - ($2::int * interval '1 month')`,
 		*licenseID, window).Scan(&newTotal); err != nil {
 		return err
 	}

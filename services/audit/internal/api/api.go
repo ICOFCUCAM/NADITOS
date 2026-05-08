@@ -264,11 +264,33 @@ func (a *API) verify(w http.ResponseWriter, r *http.Request) {
 }
 
 // canonical produces a stable byte representation of an event.
+//
+// The hash chain must survive a JSONB round-trip on `before` and `after`
+// — Postgres normalizes JSONB on insert (alphabetical keys, no
+// whitespace, canonical numbers) so the bytes the verifier reads are
+// NOT the bytes the writer received from the wire. We renormalize both
+// fields through Go's json package on both write and verify so the hash
+// is computed against the same canonical form.
 func canonical(ev event) ([]byte, error) {
-	// json.Marshal sorts map keys alphabetically per the spec; struct field
-	// order is deterministic. Drop sub-millisecond jitter for stability.
 	ev.OccurredAt = ev.OccurredAt.UTC().Truncate(time.Millisecond)
+	ev.Before = normalizeJSON(ev.Before)
+	ev.After = normalizeJSON(ev.After)
 	return json.Marshal(ev)
+}
+
+func normalizeJSON(b json.RawMessage) json.RawMessage {
+	if len(b) == 0 || string(b) == "null" {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return b // malformed JSON: leave as-is so mismatch signals tamper
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return b
+	}
+	return out
 }
 
 func nullJSON(b json.RawMessage) any {

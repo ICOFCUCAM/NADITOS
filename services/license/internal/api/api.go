@@ -36,13 +36,15 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, audit: audit, bus: bus}
 	mux := http.NewServeMux()
 
-	// Lifecycle
+	// Lifecycle. GET /v1/licenses?number=X is a search-shaped lookup so
+	// it doesn't collide with /v1/licenses/{id}/* — Go 1.22 ServeMux
+	// requires that any two patterns be unambiguously orderable.
 	mux.Handle("POST /v1/licenses",
 		issuer.Middleware(auth.RequirePermission("license:write")(http.HandlerFunc(a.create))))
-	mux.Handle("GET  /v1/licenses/{id}",
+	mux.Handle("GET /v1/licenses",
+		issuer.Middleware(auth.RequirePermission("license:read")(http.HandlerFunc(a.list))))
+	mux.Handle("GET /v1/licenses/{id}",
 		issuer.Middleware(auth.RequirePermission("license:read")(http.HandlerFunc(a.get))))
-	mux.Handle("GET  /v1/licenses/by-number/{n}",
-		issuer.Middleware(auth.RequirePermission("license:read")(http.HandlerFunc(a.byNumber))))
 	mux.Handle("PATCH /v1/licenses/{id}",
 		issuer.Middleware(auth.RequirePermission("license:write")(http.HandlerFunc(a.update))))
 
@@ -161,15 +163,25 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, l)
 }
 
-func (a *API) byNumber(w http.ResponseWriter, r *http.Request) {
+// list handles both "search" and "single-lookup" shapes:
+//
+//	GET /v1/licenses?number=DL-12345  → returns the matching license, or 404
+//	GET /v1/licenses                  → reserved for paginated browse
+//	                                    (Phase-3; returns empty list for now)
+func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	conn, err := db.WithTenant(r.Context(), a.pool)
 	if err != nil { httpx.WriteErr(w, err); return }
 	defer conn.Release()
-	l, err := scanLicense(conn.QueryRow(r.Context(),
-		licenseSelect+`WHERE license_number=$1`, r.PathValue("n")))
-	if writeIfNotFound(w, err) { return }
-	if err != nil { httpx.WriteErr(w, err); return }
-	httpx.WriteJSON(w, http.StatusOK, l)
+
+	if num := r.URL.Query().Get("number"); num != "" {
+		l, err := scanLicense(conn.QueryRow(r.Context(),
+			licenseSelect+`WHERE license_number=$1`, num))
+		if writeIfNotFound(w, err) { return }
+		if err != nil { httpx.WriteErr(w, err); return }
+		httpx.WriteJSON(w, http.StatusOK, l)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": []license{}})
 }
 
 func (a *API) update(w http.ResponseWriter, r *http.Request) {
