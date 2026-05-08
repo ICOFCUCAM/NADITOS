@@ -32,9 +32,15 @@ export default function LoginPage() {
           <p className="text-sm text-slate-600">Citizen portal</p>
         </div>
         <form onSubmit={onSubmit} className="space-y-3">
-          <Input value={tenant} onChange={(e) => setTenant(e.target.value)} placeholder="Tenant / country" />
-          <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" />
+          <Input value={tenant}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTenant(e.target.value)}
+            placeholder="Tenant / country" />
+          <Input value={email}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEmail(e.target.value)}
+            placeholder="Email" />
+          <Input type="password" value={password}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
+            placeholder="Password" />
           {err && <p className="text-sm text-red-600">{err}</p>}
           <Button type="submit" disabled={busy} className="w-full">
             {busy ? "Signing in…" : "Sign in"}

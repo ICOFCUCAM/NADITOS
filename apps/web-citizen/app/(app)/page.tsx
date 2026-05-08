@@ -8,16 +8,24 @@ export default function CitizenHome() {
     <>
       <h1 className="text-2xl font-bold">My account</h1>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <Link href="/fines"><Card className="hover:shadow-md transition">
-          <div className="text-lg font-semibold">My fines</div>
-          <div className="text-sm text-slate-600">View, dispute, or pay outstanding fines.</div>
+        <Link href="/owner"><Card className="hover:shadow-md transition">
+          <div className="text-lg font-semibold">My profile</div>
+          <div className="text-sm text-slate-600">
+            Claim or update the owner record we use to send fine notices and reminders.
+          </div>
         </Card></Link>
-        <Card>
+        <Link href="/vehicles"><Card className="hover:shadow-md transition">
           <div className="text-lg font-semibold">My vehicles</div>
           <div className="text-sm text-slate-600">
-            Phase-2: list of vehicles you own with insurance / inspection status.
+            Vehicles registered to you with live insurance and inspection status.
           </div>
-        </Card>
+        </Card></Link>
+        <Link href="/fines"><Card className="hover:shadow-md transition">
+          <div className="text-lg font-semibold">My fines</div>
+          <div className="text-sm text-slate-600">
+            View, dispute, or pay outstanding fines.
+          </div>
+        </Card></Link>
       </div>
     </>
   );
