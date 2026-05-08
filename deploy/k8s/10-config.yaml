@@ -1,0 +1,25 @@
+# Non-secret config and a placeholder for secrets — wire to your secret
+# manager in production (External Secrets Operator / SecretsManager / Vault).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: naditos-config
+  namespace: naditos
+data:
+  LOG_LEVEL: "info"
+  JWT_ACCESS_TTL: "15m"
+  JWT_REFRESH_TTL: "720h"
+  AUDIT_URL: "http://audit:8007"
+  DEFAULT_LOCALE: "en"
+  DEFAULT_COUNTRY: "XX"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: naditos-secrets
+  namespace: naditos
+type: Opaque
+stringData:
+  DATABASE_URL: "postgres://naditos:replace-me@postgres:5432/naditos?sslmode=require"
+  REDIS_URL:    "redis://redis:6379/0"
+  JWT_SECRET:   "REPLACE-WITH-OPENSSL-RAND-HEX-64"

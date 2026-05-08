@@ -1,0 +1,14 @@
+{
+  "name": "naditos",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev:admin":   "pnpm --filter @naditos/web-admin dev -p 3000",
+    "dev:police":  "pnpm --filter @naditos/police-pwa dev -p 3001",
+    "dev:citizen": "pnpm --filter @naditos/web-citizen dev -p 3002",
+    "build":       "pnpm -r build",
+    "lint":        "pnpm -r lint",
+    "type-check":  "pnpm -r type-check"
+  }
+}

@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: naditos
+      POSTGRES_USER: naditos
+      POSTGRES_PASSWORD: naditos
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U naditos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: naditos
+      MINIO_ROOT_PASSWORD: naditos1234
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
+  auth:
+    build:
+      context: .
+      dockerfile: deploy/docker/go-service.Dockerfile
+      args: { SERVICE: auth }
+    env_file: .env
+    environment:
+      SERVICE_PORT: 8001
+      DATABASE_URL: postgres://naditos:naditos@postgres:5432/naditos?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+    depends_on: [postgres, redis]
+    ports: ["8001:8001"]
+
+  registry:
+    build:
+      context: .
+      dockerfile: deploy/docker/go-service.Dockerfile
+      args: { SERVICE: registry }
+    env_file: .env
+    environment:
+      SERVICE_PORT: 8002
+      DATABASE_URL: postgres://naditos:naditos@postgres:5432/naditos?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      AUDIT_URL: http://audit:8007
+    depends_on: [postgres, redis, audit]
+    ports: ["8002:8002"]
+
+  fines:
+    build:
+      context: .
+      dockerfile: deploy/docker/go-service.Dockerfile
+      args: { SERVICE: fines }
+    env_file: .env
+    environment:
+      SERVICE_PORT: 8006
+      DATABASE_URL: postgres://naditos:naditos@postgres:5432/naditos?sslmode=disable
+      AUDIT_URL: http://audit:8007
+    depends_on: [postgres, audit]
+    ports: ["8006:8006"]
+
+  audit:
+    build:
+      context: .
+      dockerfile: deploy/docker/go-service.Dockerfile
+      args: { SERVICE: audit }
+    env_file: .env
+    environment:
+      SERVICE_PORT: 8007
+      DATABASE_URL: postgres://naditos:naditos@postgres:5432/naditos?sslmode=disable
+    depends_on: [postgres]
+    ports: ["8007:8007"]
+
+volumes:
+  pgdata:
+  miniodata:

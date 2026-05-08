@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go services
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+      - name: go mod tidy
+        run: |
+          for s in services/*/; do
+            (cd "$s" && go mod tidy)
+          done
+          (cd packages/go-common && go mod tidy)
+      - name: go build
+        run: |
+          for s in services/*/; do
+            (cd "$s" && go build ./...)
+          done
+      - name: go vet
+        run: |
+          for s in services/*/; do
+            (cd "$s" && go vet ./...)
+          done
+      - name: go test
+        run: |
+          for s in services/*/; do
+            (cd "$s" && go test ./...)
+          done
+
+  web:
+    name: Next.js apps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r type-check
+      - run: pnpm -r build
+
+  schema:
+    name: SQL syntax
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: naditos
+          POSTGRES_USER: naditos
+          POSTGRES_PASSWORD: naditos
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U naditos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgres://naditos:naditos@localhost:5432/naditos?sslmode=disable
+        run: |
+          chmod +x scripts/migrate.sh
+          ./scripts/migrate.sh up

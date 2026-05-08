@@ -1,0 +1,7 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "cd ../.. && pnpm install --frozen-lockfile && pnpm --filter @naditos/web-admin build",
+  "installCommand": "echo skip",
+  "outputDirectory": ".next"
+}
