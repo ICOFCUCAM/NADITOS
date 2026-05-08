@@ -311,6 +311,12 @@ PLATE2="DEM-$(date +%s)"
 PGPASSWORD=naditos psql -h localhost -U naditos -d naditos >/dev/null 2>&1 -c \
   "INSERT INTO vehicles (tenant_id, plate) VALUES ('$TENANT', '$PLATE2');"
 
+# Capture cutoff so notification checks below ignore artefacts left
+# behind by previous smoke runs in the same tenant. Use epoch seconds
+# (a single token) to avoid timestamp-with-space parsing pain.
+DEMERIT_T0=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+  "SELECT EXTRACT(EPOCH FROM now())::bigint;" | tr -d ' ')
+
 echo "→ demerit fine 1/2"
 issue_speed30 "$PLATE" "deadbeef1" >/dev/null
 echo "→ demerit fine 2/2 (crosses threshold)"
@@ -321,7 +327,8 @@ SUSP_COUNT=0
 for i in $(seq 1 30); do
   SUSP_COUNT=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
     "SELECT COUNT(*) FROM notification_records
-       WHERE tenant_id='$TENANT' AND template='license.suspended.v1' AND status='sent';" \
+       WHERE tenant_id='$TENANT' AND template='license.suspended.v1'
+         AND status='sent' AND created_at >= to_timestamp($DEMERIT_T0);" \
     2>/dev/null | tr -d ' ')
   [ "${SUSP_COUNT:-0}" -ge 1 ] && break
   sleep 0.5
@@ -353,7 +360,8 @@ REIN_COUNT=0
 for i in $(seq 1 30); do
   REIN_COUNT=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
     "SELECT COUNT(*) FROM notification_records
-       WHERE tenant_id='$TENANT' AND template='license.reinstated.v1' AND status='sent';" \
+       WHERE tenant_id='$TENANT' AND template='license.reinstated.v1'
+         AND status='sent' AND created_at >= to_timestamp($DEMERIT_T0);" \
     2>/dev/null | tr -d ' ')
   [ "${REIN_COUNT:-0}" -ge 1 ] && break
   sleep 0.5
