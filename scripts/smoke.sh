@@ -137,18 +137,35 @@ VID=$(echo "$VEH" | jq -r .id)
 [ -n "$VID" ] && [ "$VID" != null ] || { echo "✗ vehicle create failed: $VEH"; exit 1; }
 echo "  ✓ vehicle $PLATE / $VID"
 
-# Link the citizen to the vehicle as owner so notifications can resolve
-# a recipient. Owners admin API is Phase-3+ — for smoke we set up via SQL.
-CITIZEN_ID=$(echo "$CITIZEN" | jq -r .user.id)
+# Link the citizen to the vehicle. The citizen self-claims their owner
+# record; the admin then links the vehicle to that owner. No SQL
+# workaround any more — this is the production path.
+
+# Grant the citizen role 'owners:self' for the demo tenant. The 0006
+# migration already does this on apply; this echo is just a no-op
+# safety net in case the smoke runs against a partially-migrated DB.
 PGPASSWORD=naditos psql -h localhost -U naditos -d naditos >/dev/null 2>&1 <<SQL
-WITH new_owner AS (
-  INSERT INTO owners (tenant_id, user_id, full_name, email)
-  VALUES ('$TENANT', '$CITIZEN_ID', 'Demo citizen', 'citizen@demo')
-  RETURNING id
-)
-UPDATE vehicles SET owner_id = (SELECT id FROM new_owner) WHERE id = '$VID';
+INSERT INTO role_permissions (tenant_id, role_code, permission)
+  VALUES ('$TENANT', 'citizen', 'owners:self')
+  ON CONFLICT DO NOTHING;
 SQL
-echo "  ✓ vehicle linked to citizen owner"
+
+# Citizen has to log back in to pick up the new permission claim.
+CITIZEN=$(login citizen@demo demo1234)
+CITIZEN_TOKEN=$(echo "$CITIZEN" | jq -r .access_token)
+
+OWNER=$(curl -sS -X POST http://localhost:8002/v1/citizens/me/owner "${H_TENANT[@]}" "${H_JSON[@]}" \
+  -H "Authorization: Bearer $CITIZEN_TOKEN" \
+  -d '{"full_name":"Demo citizen","email":"citizen@demo","phone":"+1-555"}')
+OWNER_ID=$(echo "$OWNER" | jq -r .id)
+[ -n "$OWNER_ID" ] && [ "$OWNER_ID" != null ] || {
+  echo "✗ self-claim failed: $OWNER"; exit 1; }
+echo "  ✓ citizen self-claimed owner $OWNER_ID"
+
+curl -sS -o /dev/null -X POST \
+  "http://localhost:8002/v1/owners/$OWNER_ID/vehicles/$VID" "${H_TENANT[@]}" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+echo "  ✓ admin linked vehicle to owner"
 
 # ─── 5. ANPR enqueue + poll ─────────────────────────────────────────────
 echo "→ officer scans plate"

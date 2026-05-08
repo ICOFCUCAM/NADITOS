@@ -33,12 +33,26 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, audit: audit, bus: bus}
 
 	root := http.NewServeMux()
+	// Vehicles
 	root.Handle("GET  /v1/vehicles",                issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.list))))
 	root.Handle("POST /v1/vehicles",                issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.create))))
 	root.Handle("GET  /v1/vehicles/{id}",           issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.get))))
 	root.Handle("PATCH /v1/vehicles/{id}",          issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.update))))
 	root.Handle("GET  /v1/vehicles/by-plate/{plate}", issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.byPlate))))
 	root.Handle("POST /v1/vehicles/{id}/flags",     issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.setFlags))))
+
+	// Owners (admin)
+	root.Handle("POST /v1/owners",                  issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.createOwner))))
+	root.Handle("GET  /v1/owners",                  issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.listOwners))))
+	root.Handle("GET  /v1/owners/{id}",             issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.getOwner))))
+	root.Handle("PATCH /v1/owners/{id}",            issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.updateOwner))))
+	root.Handle("POST /v1/owners/{id}/vehicles/{vid}", issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.linkVehicle))))
+
+	// Citizen self-service. The route is gated by 'owners:self' so a
+	// regular browse-only citizen JWT can't claim ownership without it.
+	root.Handle("POST /v1/citizens/me/owner",       issuer.Middleware(auth.RequirePermission("owners:self")(http.HandlerFunc(a.selfClaimOwner))))
+	root.Handle("GET  /v1/citizens/me/vehicles",    issuer.Middleware(http.HandlerFunc(a.myVehicles)))
+
 	return root
 }
 
