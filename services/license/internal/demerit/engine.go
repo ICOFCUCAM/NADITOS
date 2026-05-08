@@ -81,13 +81,21 @@ func (e *Engine) applyForFine(ctx context.Context, tenantID, fineID string) erro
 		offenceCode  string
 		points       int
 	)
+	// Country packs serialize offences as an array — the source of truth
+	// is regulation.Pack.Offences ([]Offence). We unnest the array and
+	// match by `code` so the manifest stays human-readable for ministry
+	// legal review while the lookup remains a single SQL hop.
 	err = tx.QueryRow(ctx,
 		`SELECT f.driver_license_id, f.offence_code,
-		        COALESCE((SELECT (manifest->'offences'->f.offence_code->>'points')::int
-		                    FROM country_packs cp
-		                    JOIN tenant_country_pack tcp ON tcp.pack_id = cp.id
-		                   WHERE tcp.tenant_id = f.tenant_id
-		                   LIMIT 1), 0)
+		        COALESCE((
+		          SELECT (o->>'points')::int
+		            FROM country_packs cp
+		            JOIN tenant_country_pack tcp ON tcp.pack_id = cp.id,
+		                 jsonb_array_elements(cp.manifest->'offences') o
+		           WHERE tcp.tenant_id = f.tenant_id
+		             AND o->>'code' = f.offence_code
+		           LIMIT 1
+		        ), 0)
 		   FROM fines f WHERE f.id = $1 AND f.tenant_id = $2`,
 		fineID, tenantID).Scan(&licenseID, &offenceCode, &points)
 	if errors.Is(err, pgx.ErrNoRows) {

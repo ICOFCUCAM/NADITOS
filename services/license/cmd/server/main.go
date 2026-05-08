@@ -19,7 +19,9 @@ func main() {
 	cfg := config.MustLoad("license", 8003)
 	log := logger.New(cfg.LogLevel)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	pool, err := db.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Error("db open failed", "err", err)
@@ -30,40 +32,34 @@ func main() {
 	issuer := auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
 	auditCl := audit.New(cfg.AuditURL, "license")
 
-	// Demerit subscribes to the local InProc bus regardless of whether
-	// the canonical bus is NATS — the relay forwards to both. Wiring is
-	// the same in dev and prod.
+	// Bus + demerit subscriber. The demerit engine reacts to fine.issued
+	// events that originate in OTHER processes (the fines service); it
+	// learns about them via the consumer below, not via direct calls.
 	localBus := events.NewInProc(log)
 	demerit.New(pool, log, auditCl, localBus).Wire(localBus)
 
-	// In dev we publish straight to localBus. In prod with NATS, the
-	// outbox relay forwards every event to NATS; a separate JetStream
-	// consumer in this process re-injects the events into localBus so
-	// demerit fires identically.
+	// Producer-side relay drains events emitted by THIS service
+	// (license.suspended, license.reinstated, license.demerit) into
+	// whichever transport is configured. In dev it's a no-op fan-out
+	// — the canonical home for cross-process delivery is the consumer
+	// loop below.
 	bus := events.OpenPublisher(os.Getenv("NATS_URL"), log)
-	relay := events.NewRelay(pool, log, fanOut{primary: bus, local: localBus})
+	relay := events.NewRelay(pool, log, bus)
 	go relay.Run(ctx)
+
+	// Cross-process delivery via a per-consumer offset. Without this
+	// the demerit engine never sees fine.issued events emitted by the
+	// fines service in dev (the producer-side relays compete for rows
+	// via SKIP LOCKED, so the license replica's relay would just miss
+	// rows that fines's relay already claimed).
+	go events.NewConsumer(pool, log, "license-demerit",
+		func(ctx context.Context, env events.Envelope) error {
+			return localBus.Publish(ctx, env)
+		},
+	).OnlyTypes(events.TypeFineIssued).Run(ctx)
 
 	h := api.New(cfg, log, pool, issuer, auditCl, localBus)
 	if err := server.Run(ctx, log, "license", cfg.Port, h); err != nil {
 		log.Error("server exited", "err", err)
 	}
-}
-
-// fanOut is a Publisher that forwards every event to a primary
-// transport (NATS in prod, in-process in dev) AND to a local InProc
-// bus. Subscribers in this process — like the demerit engine — only
-// know about localBus.
-type fanOut struct {
-	primary events.Publisher
-	local   events.Publisher
-}
-
-func (f fanOut) Publish(ctx context.Context, env events.Envelope) error {
-	_ = f.local.Publish(ctx, env)
-	return f.primary.Publish(ctx, env)
-}
-func (f fanOut) Close() error {
-	_ = f.local.Close()
-	return f.primary.Close()
 }

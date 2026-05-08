@@ -275,5 +275,94 @@ done
 }
 echo "  ✓ $NOTIF_COUNT notifications delivered (fine.issued + fine.paid)"
 
+# ─── 12. demerit → suspend → reinstate → notify loop ───────────────────
+# Issue two SPEED_30 fines (6 points each) with the citizen's license
+# attached. The threshold is 12 → on the second fine the demerit engine
+# auto-suspends the license and writes license.suspended into the
+# outbox. The notifications consumer drains it and sends the citizen a
+# suspended notice. An admin then lifts the suspension via API; the
+# citizen gets a reinstated notice.
+echo "→ demerit loop: seed driver license for citizen"
+DLNUM="DL-SMOKE-$(printf '%04x' $((RANDOM)))"
+PGPASSWORD=naditos psql -h localhost -U naditos -d naditos >/dev/null 2>&1 <<SQL
+INSERT INTO driver_licenses
+  (tenant_id, user_id, license_number, full_name, classes, issued_at, expires_at)
+SELECT '$TENANT', u.id, '$DLNUM', 'Demo citizen', ARRAY['B'],
+       '2020-01-01', '2030-01-01'
+  FROM users u WHERE u.tenant_id='$TENANT' AND u.email='citizen@demo';
+SQL
+echo "  ✓ license $DLNUM seeded"
+
+issue_speed30() {
+  local plate=$1
+  local sha=$2
+  curl -sS -X POST http://localhost:8006/v1/fines "${H_TENANT[@]}" "${H_JSON[@]}" \
+    -H "Authorization: Bearer $OFFICER_TOKEN" \
+    -d "{\"plate\":\"$plate\",\"offence_code\":\"SPEED_30\",
+         \"driver_license\":\"$DLNUM\",
+         \"geo_lat\":60.4,\"geo_lng\":5.32,\"device_id\":\"smoke-device\",
+         \"evidence\":[{\"kind\":\"photo\",\"s3_key\":\"smoke/$sha.jpg\",
+           \"sha256\":\"$sha\",\"bytes\":12345,
+           \"taken_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}]}"
+}
+
+# Two SPEED_30 fines on different plates (avoids duplicate-protection).
+PLATE2="DEM-$(date +%s)"
+PGPASSWORD=naditos psql -h localhost -U naditos -d naditos >/dev/null 2>&1 -c \
+  "INSERT INTO vehicles (tenant_id, plate) VALUES ('$TENANT', '$PLATE2');"
+
+echo "→ demerit fine 1/2"
+issue_speed30 "$PLATE" "deadbeef1" >/dev/null
+echo "→ demerit fine 2/2 (crosses threshold)"
+issue_speed30 "$PLATE2" "deadbeef2" >/dev/null
+
+echo "→ wait for license.suspended notification"
+SUSP_COUNT=0
+for i in $(seq 1 30); do
+  SUSP_COUNT=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+    "SELECT COUNT(*) FROM notification_records
+       WHERE tenant_id='$TENANT' AND template='license.suspended.v1' AND status='sent';" \
+    2>/dev/null | tr -d ' ')
+  [ "${SUSP_COUNT:-0}" -ge 1 ] && break
+  sleep 0.5
+done
+[ "${SUSP_COUNT:-0}" -ge 1 ] || {
+  echo "✗ expected license.suspended notification, got $SUSP_COUNT"
+  PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -c \
+    "SELECT template, status, recipient FROM notification_records
+       WHERE tenant_id='$TENANT';"
+  exit 1
+}
+echo "  ✓ license.suspended delivered"
+
+echo "→ admin lifts the suspension"
+LICENSE_ID=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+  "SELECT id FROM driver_licenses WHERE tenant_id='$TENANT' AND license_number='$DLNUM';" \
+  | tr -d ' ')
+SUSP_ID=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+  "SELECT id FROM driver_suspensions WHERE license_id='$LICENSE_ID' AND lifted_at IS NULL LIMIT 1;" \
+  | tr -d ' ')
+LIFT_RC=$(curl -sS -o /tmp/smoke.body -w '%{http_code}' \
+  -X POST "http://localhost:8003/v1/licenses/$LICENSE_ID/suspensions/$SUSP_ID/lift" \
+  "${H_TENANT[@]}" -H "Authorization: Bearer $ADMIN_TOKEN")
+[ "$LIFT_RC" = 204 ] || { echo "✗ lift failed: $LIFT_RC: $(cat /tmp/smoke.body)"; exit 1; }
+echo "  ✓ suspension lifted"
+
+echo "→ wait for license.reinstated notification"
+REIN_COUNT=0
+for i in $(seq 1 30); do
+  REIN_COUNT=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+    "SELECT COUNT(*) FROM notification_records
+       WHERE tenant_id='$TENANT' AND template='license.reinstated.v1' AND status='sent';" \
+    2>/dev/null | tr -d ' ')
+  [ "${REIN_COUNT:-0}" -ge 1 ] && break
+  sleep 0.5
+done
+[ "${REIN_COUNT:-0}" -ge 1 ] || {
+  echo "✗ expected license.reinstated notification, got $REIN_COUNT"
+  exit 1
+}
+echo "  ✓ license.reinstated delivered"
+
 echo
 echo "✅ smoke run complete — all stages green"

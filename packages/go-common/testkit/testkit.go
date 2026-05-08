@@ -304,15 +304,17 @@ func seedTenant(t *testing.T, e *Env) {
 		         ON CONFLICT DO NOTHING`,
 			e.Tenant, o.Code, o.Amount, o.Window)
 	}
-	// Bind the demo country pack so demerit picks up points.
+	// Bind a country pack matching the manifest contract: offences is
+	// a JSON array of objects with a `code` field (regulation.Pack
+	// uses []Offence, so production demo + tests stay aligned).
 	e.Exec(`INSERT INTO country_packs (id, country_code, version, effective_from, manifest)
 	         VALUES ($1::text, 'XX', '1.0', '2026-01-01',
 	           jsonb_build_object('id', $1::text, 'country_code','XX','version','1.0',
 	             'plate_regex','^[A-Z0-9-]{2,10}$', 'currency','EUR',
-	             'offences', jsonb_build_object(
-	                'INS_EXPIRED', jsonb_build_object('points', 4),
-	                'INSP_EXPIRED', jsonb_build_object('points', 2),
-	                'SPEED_30',     jsonb_build_object('points', 6))))
+	             'offences', jsonb_build_array(
+	                jsonb_build_object('code','INS_EXPIRED',  'points', 4),
+	                jsonb_build_object('code','INSP_EXPIRED', 'points', 2),
+	                jsonb_build_object('code','SPEED_30',     'points', 6))))
 	         ON CONFLICT (id) DO NOTHING`, "pack_"+e.Tenant)
 	e.Exec(`INSERT INTO tenant_country_pack (tenant_id, pack_id) VALUES ($1, $2)
 	         ON CONFLICT (tenant_id) DO UPDATE SET pack_id=EXCLUDED.pack_id`,

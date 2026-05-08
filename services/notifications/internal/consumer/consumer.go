@@ -65,6 +65,12 @@ func (c *Consumer) Run(ctx context.Context) {
 	}
 }
 
+// Tick runs one drain cycle synchronously. Tests use this to avoid
+// goroutine leaks between cases — running the tick body in the test
+// goroutine guarantees no stale consumer is still processing events
+// from the next test.
+func (c *Consumer) Tick(ctx context.Context) error { return c.tick(ctx) }
+
 func (c *Consumer) tick(ctx context.Context) error {
 	conn, err := c.pool.Acquire(ctx)
 	if err != nil {

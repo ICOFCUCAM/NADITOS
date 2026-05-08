@@ -421,3 +421,93 @@ func TestFineIssue_OutboxRollsBackOnFailure(t *testing.T) {
 		t.Fatalf("want exactly 1 outbox row (duplicate must roll back), got %d", outboxCount)
 	}
 }
+
+// seedDriverLicense creates a driver_licenses row for the given tenant
+// and returns the license number. The smoke + this test rely on the
+// fine handler resolving license_number → driver_license_id so the
+// demerit engine can apply points.
+func seedDriverLicense(t *testing.T, env *testkit.Env, fullName string) string {
+	t.Helper()
+	number := "DL-" + strings.ToUpper(uuid.NewString()[:8])
+	env.Exec(`INSERT INTO driver_licenses
+	         (tenant_id, license_number, full_name, classes,
+	          issued_at, expires_at)
+	         VALUES ($1, $2, $3, $4, '2020-01-01', '2030-01-01')`,
+		env.Tenant, number, fullName, []string{"B"})
+	return number
+}
+
+// TestFineIssue_AttachesDriverLicense: when the request includes the
+// driver_license number, the fine row's driver_license_id is set so
+// the demerit engine can pick it up downstream.
+func TestFineIssue_AttachesDriverLicense(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	number := seedDriverLicense(t, env, "Driver Doe")
+	tok, _ := env.Token("officer", "fines:create")
+
+	body := fmt.Sprintf(`{
+		"plate":%q,"offence_code":"INS_EXPIRED",
+		"driver_license":%q,
+		"geo_lat":60,"geo_lng":5,"device_id":"d","evidence":[
+		{"kind":"photo","s3_key":"e","sha256":"abc","bytes":1,"taken_at":%q}]}`,
+		plate, number, time.Now().UTC().Format(time.RFC3339))
+	rec := httptest.NewRecorder()
+	build(env).ServeHTTP(rec, env.Req("POST", "/v1/fines", body, tok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("issue: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+
+	// Cross-check that fines.driver_license_id matches the seeded one.
+	var fineLID, expectedLID string
+	if err := env.QueryRow(
+		`SELECT driver_license_id::text FROM fines WHERE id=$1`, out.ID).
+		Scan(&fineLID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.QueryRow(
+		`SELECT id::text FROM driver_licenses WHERE license_number=$1`, number).
+		Scan(&expectedLID); err != nil {
+		t.Fatal(err)
+	}
+	if fineLID != expectedLID {
+		t.Fatalf("driver_license_id: want %s, got %s", expectedLID, fineLID)
+	}
+}
+
+// TestFineIssue_UnknownDriverLicense_Rejects: a typo in the license
+// number must be a 400, not a silently-stored fine with NULL
+// driver_license_id. Officers shouldn't be guessing.
+func TestFineIssue_UnknownDriverLicense_Rejects(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	tok, _ := env.Token("officer", "fines:create")
+
+	body := fmt.Sprintf(`{
+		"plate":%q,"offence_code":"INS_EXPIRED",
+		"driver_license":"DL-DOES-NOT-EXIST",
+		"geo_lat":60,"geo_lng":5,"device_id":"d","evidence":[
+		{"kind":"photo","s3_key":"e","sha256":"abc","bytes":1,"taken_at":%q}]}`,
+		plate, time.Now().UTC().Format(time.RFC3339))
+	rec := httptest.NewRecorder()
+	build(env).ServeHTTP(rec, env.Req("POST", "/v1/fines", body, tok))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "unknown_license") {
+		t.Fatalf("want unknown_license code, got %s", rec.Body.String())
+	}
+
+	// And no fine row should have been created (the tx rolled back).
+	var fineCount int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM fines WHERE tenant_id=$1`, env.Tenant).
+		Scan(&fineCount); err != nil {
+		t.Fatal(err)
+	}
+	if fineCount != 0 {
+		t.Fatalf("want 0 fines after 400, got %d", fineCount)
+	}
+}

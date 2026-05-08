@@ -180,19 +180,41 @@ func (a *API) issue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 4. Insert the fine.
+	// 4. Optional driver-license linkage. When the officer scans the
+	//    citizen's QR/NFC bundle (or types their license number) the
+	//    fine is attached to the license so the demerit engine can
+	//    apply points. Lookup is tenant-scoped; an unknown number is
+	//    a 400 — the officer should not be guessing.
+	var driverLicenseID *uuid.UUID
+	if in.DriverLicense != nil && *in.DriverLicense != "" {
+		var lid uuid.UUID
+		err := tx.QueryRow(r.Context(),
+			`SELECT id FROM driver_licenses WHERE license_number=$1`, *in.DriverLicense).Scan(&lid)
+		if errors.Is(err, pgx.ErrNoRows) {
+			httpx.WriteErr(w, httpx.Err(400, "unknown_license",
+				"Driver license number not found."))
+			return
+		}
+		if err != nil {
+			httpx.WriteErr(w, err)
+			return
+		}
+		driverLicenseID = &lid
+	}
+
+	// 5. Insert the fine.
 	dueAt := time.Now().Add(14 * 24 * time.Hour)
 	var id uuid.UUID
 	err = tx.QueryRow(r.Context(),
 		`INSERT INTO fines (
 			tenant_id, vehicle_id, plate, offence_code, amount, currency,
 			issued_by, device_id, geo_lat, geo_lng, geo_accuracy_m,
-			due_at, notes)
-		 VALUES ($1,$2,$3,$4,$5::numeric,$6,$7,$8,$9,$10,$11,$12,$13)
+			due_at, notes, driver_license_id)
+		 VALUES ($1,$2,$3,$4,$5::numeric,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		 RETURNING id`,
 		c.TenantID, vehicleID, in.Plate, in.OffenceCode, amount, currency,
 		issuedBy, in.DeviceID, in.GeoLat, in.GeoLng, in.GeoAccuracy,
-		dueAt, in.Notes).Scan(&id)
+		dueAt, in.Notes, driverLicenseID).Scan(&id)
 	if err != nil {
 		httpx.WriteErr(w, err)
 		return

@@ -80,7 +80,7 @@ func resolveByLicense(ctx context.Context, tx pgx.Tx, tenant, licenseID string) 
 		        COALESCE(u.full_name, l.full_name, '')
 		   FROM driver_licenses l
 		   LEFT JOIN users u ON u.id = l.user_id
-		  WHERE l.id = $1 AND l.tenant_id = $2`,
+		  WHERE l.id = $1::uuid AND l.tenant_id = $2`,
 		licenseID, tenant)
 	var email, phone, name string
 	if err := row.Scan(&email, &phone, &name); err != nil {

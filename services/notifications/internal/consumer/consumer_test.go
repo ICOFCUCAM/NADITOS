@@ -100,22 +100,25 @@ func seedVehicleAndCitizen(t *testing.T, env *testkit.Env) (string, string) {
 	return vehicleID.String(), email
 }
 
-// drainOnce waits until the consumer's offset has caught up to the
-// given event id (or the test deadline trips).
+// drainOnce drives the consumer synchronously until the offset has
+// caught up to the given event id, or fails. Synchronous-tick avoids
+// the goroutine leak that bit us when one test's consumer kept
+// processing events that the next test wrote.
 func drainOnce(t *testing.T, env *testkit.Env, c *consumer.Consumer, throughEventID int64) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	go c.Run(ctx)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	for i := 0; i < 20; i++ {
+		if err := c.Tick(ctx); err != nil {
+			t.Fatalf("consumer Tick: %v", err)
+		}
 		var off int64
 		_ = env.QueryRow(`SELECT last_event_id FROM event_consumer_offsets WHERE consumer='notifications'`).
 			Scan(&off)
 		if off >= throughEventID {
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("consumer did not advance past %d in time", throughEventID)
 }
@@ -127,7 +130,7 @@ func TestConsumer_FineIssued_SendsNotification(t *testing.T) {
 	vehicleID, email := seedVehicleAndCitizen(t, env)
 
 	sender := &captureSender{}
-	c := consumer.New(env.AdminPool(), discardLogger(), sender)
+	c := consumer.New(env.AdminPool(), captureLogger(t), sender)
 
 	eid := writeOutbox(t, env, events.Envelope{
 		ID: uuid.NewString(), Type: events.TypeFineIssued, Version: 1,
@@ -214,7 +217,7 @@ func TestConsumer_AdvancesPastFailedSends(t *testing.T) {
 	vehicleID, _ := seedVehicleAndCitizen(t, env)
 
 	sender := &captureSender{err: errors.New("provider down")}
-	c := consumer.New(env.AdminPool(), discardLogger(), sender)
+	c := consumer.New(env.AdminPool(), captureLogger(t), sender)
 	eid := writeOutbox(t, env, events.Envelope{
 		ID: uuid.NewString(), Type: events.TypeFineIssued, Version: 1,
 		Source: "fines", TenantID: env.Tenant, OccurredAt: time.Now().UTC(),
@@ -262,7 +265,7 @@ func TestConsumer_LicenseSuspended_SendsNotification(t *testing.T) {
 	lid, email := seedLicenseAndCitizen(t, env)
 
 	sender := &captureSender{}
-	c := consumer.New(env.AdminPool(), discardLogger(), sender)
+	c := consumer.New(env.AdminPool(), captureLogger(t), sender)
 	eid := writeOutbox(t, env, events.Envelope{
 		ID: uuid.NewString(), Type: events.TypeLicenseSuspended, Version: 1,
 		Source: "license", TenantID: env.Tenant, OccurredAt: time.Now().UTC(),
@@ -299,7 +302,7 @@ func TestConsumer_LicenseReinstated_SendsNotification(t *testing.T) {
 	lid, email := seedLicenseAndCitizen(t, env)
 
 	sender := &captureSender{}
-	c := consumer.New(env.AdminPool(), discardLogger(), sender)
+	c := consumer.New(env.AdminPool(), captureLogger(t), sender)
 	eid := writeOutbox(t, env, events.Envelope{
 		ID: uuid.NewString(), Type: events.TypeLicenseReinstated, Version: 1,
 		Source: "license", TenantID: env.Tenant, OccurredAt: time.Now().UTC(),
