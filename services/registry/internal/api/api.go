@@ -52,6 +52,18 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	// regular browse-only citizen JWT can't claim ownership without it.
 	root.Handle("POST /v1/citizens/me/owner",       issuer.Middleware(auth.RequirePermission("owners:self")(http.HandlerFunc(a.selfClaimOwner))))
 	root.Handle("GET  /v1/citizens/me/vehicles",    issuer.Middleware(http.HandlerFunc(a.myVehicles)))
+	// Citizen-to-citizen vehicle ownership transfer. The seller starts
+	// the transfer; the buyer accepts with the returned code. Existing
+	// fines stay attached to the seller — only future responsibility
+	// shifts.
+	root.Handle("POST /v1/citizens/me/vehicles/{vid}/transfer",
+		issuer.Middleware(http.HandlerFunc(a.startTransfer)))
+	root.Handle("GET  /v1/citizens/me/transfers",
+		issuer.Middleware(http.HandlerFunc(a.listMyTransfers)))
+	root.Handle("POST /v1/citizens/me/transfers/{id}/cancel",
+		issuer.Middleware(http.HandlerFunc(a.cancelTransfer)))
+	root.Handle("POST /v1/citizens/me/transfers/accept",
+		issuer.Middleware(http.HandlerFunc(a.acceptTransfer)))
 
 	return root
 }
