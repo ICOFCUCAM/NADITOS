@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
-  Card, Pill, services, useSession,
+  Button, Card, Input, Pill, services, useSession,
   statusBadgeClasses, statusLabel, type VehicleStatus,
 } from "@naditos/web-common";
 
@@ -23,27 +23,43 @@ export default function MyVehiclesPage() {
   const { session } = useSession();
   const [items, setItems] = useState<Vehicle[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Per-vehicle transient transfer state. transferring[id] holds the
+  // user's draft to_contact; issuedCodes[id] holds the {code, expires}
+  // tuple after a successful start so the seller can read it back.
+  const [transferring, setTransferring] = useState<Record<string, string>>({});
+  const [issuedCodes, setIssuedCodes] = useState<Record<string, { code: string; expires_at: string }>>({});
+  const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
     if (!session) return;
     services.registry("/v1/citizens/me/vehicles", {
-      token: session.accessToken,
-      tenant: session.user.tenant,
+      token: session.accessToken, tenant: session.user.tenant,
     })
       .then((r: any) => setItems(r.items ?? []))
       .catch((e) => setErr(e?.message ?? "Failed to load"));
   }, [session]);
 
-  if (err) {
-    return (
-      <Card className="text-red-700">
-        Couldn't load your vehicles: {err}
-      </Card>
-    );
+  async function startTransfer(vid: string) {
+    if (!session) return;
+    const to = (transferring[vid] ?? "").trim();
+    if (!to) return;
+    setBusy(vid); setErr(null);
+    try {
+      const r: any = await services.registry(
+        `/v1/citizens/me/vehicles/${vid}/transfer`,
+        {
+          method: "POST", body: { to_contact: to },
+          token: session.accessToken, tenant: session.user.tenant,
+        });
+      setIssuedCodes((m) => ({ ...m, [vid]: { code: r.code, expires_at: r.expires_at } }));
+      setTransferring((m) => { const n = { ...m }; delete n[vid]; return n; });
+    } catch (e: any) {
+      setErr(e?.message ?? "Transfer failed");
+    } finally { setBusy(null); }
   }
-  if (items === null) {
-    return <Card>Loading…</Card>;
-  }
+
+  if (err) return <Card className="text-red-700">Couldn't load: {err}</Card>;
+  if (items === null) return <Card>Loading…</Card>;
   if (items.length === 0) {
     return (
       <>
@@ -88,6 +104,58 @@ export default function MyVehiclesPage() {
               <div>Inspection: <span className="text-slate-800">{date(v.inspection_expires_at)}</span></div>
             </div>
             {v.is_stolen && <Pill tone="black">stolen</Pill>}
+
+            {/* Transfer surface. issuedCodes[v.id] takes precedence so a
+                seller who just generated a code sees it instead of the
+                form they used to generate it. */}
+            <div className="mt-4 pt-3 border-t border-slate-100">
+              {issuedCodes[v.id] ? (
+                <div className="space-y-1">
+                  <div className="text-xs uppercase tracking-wide text-slate-500">
+                    Transfer code
+                  </div>
+                  <div className="font-mono text-2xl tracking-widest">
+                    {issuedCodes[v.id].code}
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    Share with the buyer. Expires{" "}
+                    {new Date(issuedCodes[v.id].expires_at).toLocaleDateString()}.{" "}
+                    <Link href="/transfers" className="underline">
+                      Manage transfers
+                    </Link>
+                  </div>
+                </div>
+              ) : transferring[v.id] !== undefined ? (
+                <div className="space-y-2">
+                  <label className="block text-xs uppercase tracking-wide text-slate-500">
+                    Buyer's email or phone
+                  </label>
+                  <Input
+                    value={transferring[v.id]}
+                    onChange={(e) => setTransferring((m) => ({ ...m, [v.id]: e.target.value }))}
+                    placeholder="buyer@example.com"
+                  />
+                  <div className="flex gap-2 justify-end">
+                    <button
+                      onClick={() => setTransferring((m) => { const n = { ...m }; delete n[v.id]; return n; })}
+                      className="text-sm text-slate-600 hover:underline">
+                      Cancel
+                    </button>
+                    <Button
+                      onClick={() => startTransfer(v.id)}
+                      disabled={!transferring[v.id]?.trim() || busy === v.id}>
+                      {busy === v.id ? "Generating…" : "Generate transfer code"}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setTransferring((m) => ({ ...m, [v.id]: "" }))}
+                  className="text-sm text-slate-600 hover:underline">
+                  Transfer ownership
+                </button>
+              )}
+            </div>
           </Card>
         ))}
       </div>

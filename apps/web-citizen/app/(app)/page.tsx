@@ -26,6 +26,12 @@ export default function CitizenHome() {
             View, dispute, or pay outstanding fines.
           </div>
         </Card></Link>
+        <Link href="/transfers"><Card className="hover:shadow-md transition">
+          <div className="text-lg font-semibold">Ownership transfers</div>
+          <div className="text-sm text-slate-600">
+            Hand a vehicle over to a buyer, or accept one with a code.
+          </div>
+        </Card></Link>
       </div>
     </>
   );
