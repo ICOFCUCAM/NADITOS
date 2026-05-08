@@ -220,13 +220,31 @@ func (a *API) issue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Insert evidence rows.
+	// 5. Insert evidence rows AND a chain-of-custody anchor row per
+	//    evidence item. The custody table is append-only by convention;
+	//    every subsequent action on an evidence object (verified,
+	//    viewed, exported, sealed) appends another row pointing at the
+	//    same evidence_id. The first 'captured' entry is what proves
+	//    the evidence existed at issuance time.
 	for _, e := range in.Evidence {
-		_, err := tx.Exec(r.Context(),
+		var evidenceID uuid.UUID
+		if err := tx.QueryRow(r.Context(),
 			`INSERT INTO fine_evidence (fine_id, kind, s3_key, sha256, bytes, taken_at)
-			 VALUES ($1,$2,$3,$4,$5,$6)`,
-			id, e.Kind, e.S3Key, e.Sha256, e.Bytes, e.TakenAt)
-		if err != nil {
+			 VALUES ($1,$2,$3,$4,$5,$6)
+			 RETURNING id`,
+			id, e.Kind, e.S3Key, e.Sha256, e.Bytes, e.TakenAt).Scan(&evidenceID); err != nil {
+			httpx.WriteErr(w, err)
+			return
+		}
+		if _, err := tx.Exec(r.Context(),
+			`INSERT INTO evidence_custody
+			   (tenant_id, fine_id, evidence_id, action,
+			    actor_user, actor_role, actor_device, details)
+			 VALUES ($1, $2, $3, 'captured',
+			         $4, $5, $6,
+			         jsonb_build_object('sha256', $7::text, 'kind', $8::text))`,
+			c.TenantID, id, evidenceID,
+			issuedBy, c.Role, in.DeviceID, e.Sha256, e.Kind); err != nil {
 			httpx.WriteErr(w, err)
 			return
 		}
@@ -384,7 +402,47 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		_ = rows.Scan(&e.Kind, &e.S3Key, &e.Sha256, &e.Bytes, &e.TakenAt)
 		evs = append(evs, e)
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"fine": f, "evidence": evs})
+
+	// Chain of custody — every action ever taken on every evidence
+	// item belonging to this fine, in chronological order. The court
+	// or defense reads this to reconstruct who did what and when.
+	custodyRows, err := conn.Query(r.Context(),
+		`SELECT cu.evidence_id, cu.action, cu.actor_user, cu.actor_role,
+		        cu.actor_device, cu.details, cu.occurred_at
+		   FROM evidence_custody cu
+		  WHERE cu.fine_id = $1
+		  ORDER BY cu.occurred_at ASC, cu.id ASC`, id)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer custodyRows.Close()
+	type custody struct {
+		EvidenceID  uuid.UUID  `json:"evidence_id"`
+		Action      string     `json:"action"`
+		ActorUser   *uuid.UUID `json:"actor_user"`
+		ActorRole   *string    `json:"actor_role"`
+		ActorDevice *string    `json:"actor_device"`
+		Details     any        `json:"details"`
+		OccurredAt  time.Time  `json:"occurred_at"`
+	}
+	custodyList := []custody{}
+	for custodyRows.Next() {
+		var co custody
+		var details *string
+		_ = custodyRows.Scan(&co.EvidenceID, &co.Action, &co.ActorUser,
+			&co.ActorRole, &co.ActorDevice, &details, &co.OccurredAt)
+		if details != nil {
+			co.Details = *details
+		}
+		custodyList = append(custodyList, co)
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"fine":     f,
+		"evidence": evs,
+		"custody":  custodyList,
+	})
 }
 
 // ─── PAY / DISPUTE / CANCEL ────────────────────────────────────────────────

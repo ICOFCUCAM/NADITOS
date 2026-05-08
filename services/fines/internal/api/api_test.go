@@ -511,3 +511,91 @@ func TestFineIssue_UnknownDriverLicense_Rejects(t *testing.T) {
 		t.Fatalf("want 0 fines after 400, got %d", fineCount)
 	}
 }
+
+// TestFineIssue_RecordsCustodyChain: when a fine is issued with
+// evidence, every evidence item gets a 'captured' row in
+// evidence_custody — the legal chain of custody starts here. The
+// row records the officer's user_id, role, device_id, and the
+// sha256 of the evidence so any later action (verified, viewed,
+// exported) appends to a chain that proves who handled the file.
+func TestFineIssue_RecordsCustodyChain(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	tok, officerID := env.Token("officer", "fines:create", "fines:read")
+
+	rec := httptest.NewRecorder()
+	build(env).ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), tok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("issue: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+
+	// One evidence item → one custody row, action='captured'.
+	var rows int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM evidence_custody
+		   WHERE fine_id=$1 AND action='captured'`, out.ID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("want 1 custody row, got %d", rows)
+	}
+
+	// Actor metadata stamped from the JWT, not the body.
+	var actor, role, device string
+	if err := env.QueryRow(
+		`SELECT actor_user::text, actor_role, actor_device FROM evidence_custody
+		   WHERE fine_id=$1`, out.ID).Scan(&actor, &role, &device); err != nil {
+		t.Fatal(err)
+	}
+	if actor != officerID {
+		t.Fatalf("actor_user: want %s got %s", officerID, actor)
+	}
+	if role != "officer" {
+		t.Fatalf("actor_role: want officer, got %s", role)
+	}
+	if device != "dev-test" {
+		t.Fatalf("actor_device: want dev-test, got %s", device)
+	}
+
+	// And GET /v1/fines/{id} surfaces the custody history.
+	rec = httptest.NewRecorder()
+	build(env).ServeHTTP(rec, env.Req("GET", "/v1/fines/"+out.ID, "", tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"action":"captured"`) {
+		t.Fatalf("response missing custody chain: %s", rec.Body.String())
+	}
+}
+
+// TestFineIssue_CustodyRollsBackOnDuplicate: when the duplicate
+// guard rejects a fine (409), the custody row from the failed
+// attempt must NOT linger. The single custody row in event_outbox
+// is the canonical proof.
+func TestFineIssue_CustodyRollsBackOnDuplicate(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	tok, _ := env.Token("officer", "fines:create")
+
+	for i, want := range []int{http.StatusCreated, http.StatusConflict} {
+		rec := httptest.NewRecorder()
+		build(env).ServeHTTP(rec, env.Req("POST", "/v1/fines",
+			validIssueBody(plate, "INS_EXPIRED"), tok))
+		if rec.Code != want {
+			t.Fatalf("attempt %d: want %d got %d %s", i, want, rec.Code, rec.Body.String())
+		}
+	}
+
+	var rows int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM evidence_custody WHERE tenant_id=$1`, env.Tenant).
+		Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("want exactly 1 custody row (duplicate must roll back), got %d", rows)
+	}
+}
