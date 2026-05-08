@@ -33,7 +33,11 @@ type Engine struct {
 	pool  *pgxpool.Pool
 	log   *slog.Logger
 	audit *audit.Client
-	bus   events.Publisher
+	// bus is kept on the struct so the constructor signature stays
+	// stable for callers, but the engine itself no longer publishes
+	// directly — events go through the outbox in the same tx as the
+	// ledger update and the relay forwards them to every consumer.
+	bus events.Publisher
 }
 
 func New(pool *pgxpool.Pool, log *slog.Logger, audit *audit.Client, bus events.Publisher) *Engine {
@@ -127,8 +131,11 @@ func (e *Engine) applyForFine(ctx context.Context, tenantID, fineID string) erro
 		return err
 	}
 
-	// Trigger automatic suspension if over threshold.
+	// Trigger automatic suspension if over threshold. The new
+	// suspension's start/end times are computed up front because the
+	// license.suspended event needs them before tx.Commit.
 	suspended := false
+	var suspStart, suspEnd time.Time
 	if newTotal >= threshold {
 		var existing int
 		_ = tx.QueryRow(ctx,
@@ -136,21 +143,49 @@ func (e *Engine) applyForFine(ctx context.Context, tenantID, fineID string) erro
 			   WHERE license_id=$1 AND ends_at > now() AND lifted_at IS NULL`,
 			*licenseID).Scan(&existing)
 		if existing == 0 {
-			ends := time.Now().Add(time.Duration(suspMonths) * 30 * 24 * time.Hour)
+			suspStart = time.Now().UTC()
+			suspEnd = suspStart.Add(time.Duration(suspMonths) * 30 * 24 * time.Hour)
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO driver_suspensions
 				   (tenant_id, license_id, reason, trigger_kind, starts_at, ends_at)
-				 VALUES ($1,$2,$3,'demerit', now(), $4)`,
+				 VALUES ($1,$2,$3,'demerit', $4, $5)`,
 				tenantID, *licenseID,
-				"demerit threshold reached", ends); err != nil {
+				"demerit threshold reached", suspStart, suspEnd); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx,
 				`UPDATE driver_licenses SET is_suspended=true, suspended_until=$2
-				   WHERE id=$1`, *licenseID, ends); err != nil {
+				   WHERE id=$1`, *licenseID, suspEnd); err != nil {
 				return err
 			}
 			suspended = true
+		}
+	}
+
+	// Outbox the events INSIDE the same tx as the ledger / suspension
+	// rows. The relay drains event_outbox into the canonical bus, so
+	// every consumer (notifications, future analytics) sees these
+	// without us having to fan out manually here. If commit fails,
+	// the events disappear together with the rows that produced them.
+	demEnv := events.NewEnvelope("license", tenantID, events.TypeLicenseDemerit, 1,
+		events.LicenseDemeritPayload{
+			LicenseID: licenseID.String(), Delta: points,
+			Reason: "fine:" + offenceCode, Source: "fine", SourceID: fineID,
+			NewTotal: newTotal,
+		})
+	if err := events.WriteOutbox(ctx, tx, demEnv); err != nil {
+		return err
+	}
+	if suspended {
+		suspEnv := events.NewEnvelope("license", tenantID, events.TypeLicenseSuspended, 1,
+			events.LicenseSuspendedPayload{
+				LicenseID: licenseID.String(), Reason: "demerit threshold reached",
+				TriggerKind: "demerit",
+				StartsAt:    suspStart.Format(time.RFC3339),
+				EndsAt:      suspEnd.Format(time.RFC3339),
+			})
+		if err := events.WriteOutbox(ctx, tx, suspEnv); err != nil {
+			return err
 		}
 	}
 
@@ -158,32 +193,11 @@ func (e *Engine) applyForFine(ctx context.Context, tenantID, fineID string) erro
 		return err
 	}
 
-	e.publish(ctx, tenantID, *licenseID, points, fineID, offenceCode, newTotal, suspended, suspMonths)
-	return nil
-}
-
-func (e *Engine) publish(ctx context.Context, tenant string, lid uuid.UUID,
-	delta int, fineID, offenceCode string, newTotal int, suspended bool, suspMonths int) {
-	dem := events.NewEnvelope("license", tenant, events.TypeLicenseDemerit, 1,
-		events.LicenseDemeritPayload{
-			LicenseID: lid.String(), Delta: delta,
-			Reason: "fine:" + offenceCode, Source: "fine", SourceID: fineID,
-			NewTotal: newTotal,
-		})
-	_ = e.bus.Publish(ctx, dem)
-	if suspended {
-		susp := events.NewEnvelope("license", tenant, events.TypeLicenseSuspended, 1,
-			events.LicenseSuspendedPayload{
-				LicenseID: lid.String(), Reason: "demerit threshold reached",
-				TriggerKind: "demerit",
-				StartsAt:    time.Now().UTC().Format(time.RFC3339),
-				EndsAt:      time.Now().AddDate(0, suspMonths, 0).UTC().Format(time.RFC3339),
-			})
-		_ = e.bus.Publish(ctx, susp)
-	}
-	_ = e.audit.Emit(ctx, "license.demerit", "license", lid.String(), nil, map[string]any{
-		"delta": delta, "fine_id": fineID, "new_total": newTotal, "suspended": suspended,
+	// Audit is best-effort and out-of-tx by design (HTTP call).
+	_ = e.audit.Emit(ctx, "license.demerit", "license", licenseID.String(), nil, map[string]any{
+		"delta": points, "fine_id": fineID, "new_total": newTotal, "suspended": suspended,
 	})
+	return nil
 }
 
 // decodeFineIssued is forgiving — the bus delivers either the typed

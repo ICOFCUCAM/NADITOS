@@ -21,8 +21,9 @@ func build(env *testkit.Env) http.Handler {
 	// The audit service is the one component that writes across tenants
 	// (it stamps every other service's mutations) and runs with a
 	// privileged DB role in production. Tests use the admin pool to
-	// match that operational shape.
-	return api.New(env.Cfg, discardLogger(), env.AdminPool())
+	// match that operational shape. nil rollup is fine — these tests
+	// exercise the audit-event endpoints, not the rollup trigger.
+	return api.New(env.Cfg, discardLogger(), env.AdminPool(), env.Issuer, nil)
 }
 
 func writeEvent(t *testing.T, h http.Handler, env *testkit.Env, action, resource, resourceID string) string {

@@ -199,3 +199,85 @@ func TestDemerit_NoLicenseLinkSkips(t *testing.T) {
 		t.Fatalf("expected no demerit rows for licenseless fine, got %d", ledgerCount)
 	}
 }
+
+// TestDemerit_WritesToOutbox: a demerit application puts the
+// license.demerit envelope in event_outbox in the same tx as the
+// ledger update — that's what makes the notifications consumer (and
+// every future analytics consumer) able to react.
+func TestDemerit_WritesToOutbox(t *testing.T) {
+	env := testkit.Setup(t)
+	bus := events.NewInProc(discardLogger())
+	auditCl := audit.New("", "license")
+	eng := demerit.New(env.AdminPool(), discardLogger(), auditCl, bus)
+	eng.Wire(bus)
+
+	_, officerID := env.Token("officer")
+	officer, _ := uuid.Parse(officerID)
+	licID := seedLicense(t, env, 0)
+	fid := seedFine(t, env, licID, "INS_EXPIRED", officer)
+	_ = bus.Publish(context.Background(),
+		events.NewEnvelope("fines", env.Tenant, events.TypeFineIssued, 1,
+			events.FineIssuedPayload{FineID: fid.String(), OffenceCode: "INS_EXPIRED"}))
+
+	var demeritEvents int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM event_outbox
+		   WHERE tenant_id=$1
+		     AND envelope->>'type'='license.demerit'
+		     AND envelope->'data'->>'license_id'=$2`,
+		env.Tenant, licID.String()).Scan(&demeritEvents); err != nil {
+		t.Fatal(err)
+	}
+	if demeritEvents != 1 {
+		t.Fatalf("expected exactly 1 license.demerit outbox row, got %d", demeritEvents)
+	}
+}
+
+// TestDemerit_SuspendedAlsoOutboxed: when threshold is crossed in a
+// single fine event, both license.demerit AND license.suspended must
+// land in event_outbox so the citizen gets the suspension notice
+// without us double-booking direct bus.Publish calls.
+func TestDemerit_SuspendedAlsoOutboxed(t *testing.T) {
+	env := testkit.Setup(t)
+	bus := events.NewInProc(discardLogger())
+	auditCl := audit.New("", "license")
+	eng := demerit.New(env.AdminPool(), discardLogger(), auditCl, bus)
+	eng.Wire(bus)
+
+	_, officerID := env.Token("officer")
+	officer, _ := uuid.Parse(officerID)
+	licID := seedLicense(t, env, 0)
+
+	// Two SPEED_30 (6 points each) crosses the 12-point threshold on
+	// the second fine; that publish must include license.suspended.
+	for i := 0; i < 2; i++ {
+		fid := seedFine(t, env, licID, "SPEED_30", officer)
+		_ = bus.Publish(context.Background(),
+			events.NewEnvelope("fines", env.Tenant, events.TypeFineIssued, 1,
+				events.FineIssuedPayload{FineID: fid.String(), OffenceCode: "SPEED_30"}))
+	}
+
+	// Two demerit envelopes; one suspension envelope (the second
+	// trigger is suppressed by the existing-suspension guard).
+	var demerit, suspended int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM event_outbox
+		   WHERE tenant_id=$1 AND envelope->>'type'='license.demerit'
+		     AND envelope->'data'->>'license_id'=$2`,
+		env.Tenant, licID.String()).Scan(&demerit); err != nil {
+		t.Fatal(err)
+	}
+	if demerit != 2 {
+		t.Fatalf("want 2 license.demerit, got %d", demerit)
+	}
+	if err := env.QueryRow(
+		`SELECT count(*) FROM event_outbox
+		   WHERE tenant_id=$1 AND envelope->>'type'='license.suspended'
+		     AND envelope->'data'->>'license_id'=$2`,
+		env.Tenant, licID.String()).Scan(&suspended); err != nil {
+		t.Fatal(err)
+	}
+	if suspended != 1 {
+		t.Fatalf("want 1 license.suspended, got %d", suspended)
+	}
+}
