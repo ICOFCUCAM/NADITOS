@@ -138,7 +138,7 @@ func (q *RetryQueue) Done(ctx context.Context, jobID uuid.UUID, runErr error) er
 		`UPDATE retry_jobs
 		    SET status=$2::retry_job_status,
 		        attempts=$3,
-		        next_run_at=now()+ ($4 || ' seconds')::interval,
+		        next_run_at=now()+ make_interval(secs => $4),
 		        last_error=$5,
 		        updated_at=now()
 		  WHERE id=$1`,

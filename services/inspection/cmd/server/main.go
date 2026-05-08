@@ -22,6 +22,7 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
 	"github.com/icofcucam/naditos/packages/go-common/logger"
 	"github.com/icofcucam/naditos/packages/go-common/server"
+	"github.com/icofcucam/naditos/services/inspection/internal/worker"
 )
 
 func main() {
@@ -43,6 +44,10 @@ func main() {
 	router.SetDefault(inspection.NewDevStub())
 	health := connectors.NewHealthMonitor(pool)
 	queue := connectors.NewRetryQueue(pool)
+
+	// Background worker drains the verify retry queue. Mirrors the
+	// shape insurance uses; Phase-4 may extract a generic drainer.
+	go worker.New(pool, log, router, health, queue).Run(ctx)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/inspection/verify",
