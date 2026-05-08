@@ -48,7 +48,9 @@ func main() {
 	// court). Sweep every 5 minutes by default.
 	go escalation.New(pool, log).Run(ctx)
 
-	h := api.New(cfg, log, pool, issuer, auditCl, pay, hm, bus)
+	// The runtime DB user is BYPASSRLS, so the same pool serves both
+	// regular and admin uses. Tests pass a distinct admin pool.
+	h := api.New(cfg, log, pool, pool, issuer, auditCl, pay, hm, bus)
 	if err := server.Run(ctx, log, "fines", cfg.Port, h); err != nil {
 		log.Error("server exited", "err", err)
 	}

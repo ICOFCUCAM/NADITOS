@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,13 +29,42 @@ func discardLogger() *slog.Logger {
 // build wires the fines API the same way main() does, against the
 // per-test environment.
 func build(env *testkit.Env) http.Handler {
+	return buildWithPay(env, payments.NewDevStub())
+}
+
+func buildWithPay(env *testkit.Env, pay payments.Provider) http.Handler {
 	return api.New(env.Cfg, discardLogger(),
-		env.Pool, env.Issuer,
+		env.Pool, env.AdminPool(), env.Issuer,
 		commonAudit.New("", "fines"), // empty URL → no-op audit emit
-		payments.NewDevStub(),
+		pay,
 		connectors.NewHealthMonitor(env.AdminPool()),
 		events.NewInProc(discardLogger()),
 	)
+}
+
+// fakePay wraps a real DevStub but lets each test rig
+// VerifyWebhook independently. The stub's VerifyWebhook always
+// rejects (production-correct), so we can't drive the webhook path
+// against it directly.
+type fakePay struct {
+	*payments.DevStub
+	verifyErr error           // if set, VerifyWebhook returns this
+	wantBody  []byte          // if non-nil, body must match exactly
+	wantSig   string          // if non-empty, header X-Sig must match
+	out       *payments.WebhookEvent
+}
+
+func (f *fakePay) VerifyWebhook(_ context.Context, headers map[string]string, body []byte) (*payments.WebhookEvent, error) {
+	if f.verifyErr != nil {
+		return nil, f.verifyErr
+	}
+	if f.wantSig != "" && headers["X-Sig"] != f.wantSig {
+		return nil, payments.ErrSignatureInvalid
+	}
+	if f.wantBody != nil && string(f.wantBody) != string(body) {
+		return nil, payments.ErrSignatureInvalid
+	}
+	return f.out, nil
 }
 
 func newVehicle(t *testing.T, env *testkit.Env) (vid uuid.UUID, plate string) {
@@ -656,5 +686,164 @@ func TestPaymentsHealth_RecordsOK(t *testing.T) {
 	}
 	if got.State != "ok" || got.FailStreak != 0 {
 		t.Fatalf("expected ok/0, got %+v", got)
+	}
+}
+
+// issuePendingPayment seeds a fine + a fine_payments(status='pending')
+// row that the webhook handler can transition. This bypasses the
+// synchronous pay path so we can drive the async-success flow that
+// real providers (Stripe, treasury) actually use.
+func issuePendingPayment(t *testing.T, env *testkit.Env, h http.Handler, plate string) (fineID, intent string) {
+	t.Helper()
+	officerTok, _ := env.Token("officer", "fines:create")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("issue: %d %s", rec.Code, rec.Body.String())
+	}
+	var issued struct{ ID string `json:"id"` }
+	if err := json.Unmarshal(rec.Body.Bytes(), &issued); err != nil {
+		t.Fatal(err)
+	}
+	intent = "intent_test_" + strings.ToLower(strings.ReplaceAll(uuid.NewString(), "-", ""))[:24]
+	env.Exec(`INSERT INTO fine_payments
+	            (fine_id, amount, currency, method, provider_ref, status)
+	          VALUES ($1, 400, 'EUR', 'card', $2, 'pending')`,
+		issued.ID, intent)
+	return issued.ID, intent
+}
+
+// TestWebhook_UnknownProvider: the {provider} path segment must match
+// the bound provider's name. A wrong name is 404 BEFORE we read the
+// body, so a malicious caller can't probe signature behaviour by
+// guessing provider names.
+func TestWebhook_UnknownProvider(t *testing.T) {
+	env := testkit.Setup(t)
+	h := build(env) // dev-stub
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines/payments/webhooks/stripe", `{}`, ""))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestWebhook_RejectsBadSignature: VerifyWebhook returning an error
+// must produce 401 and leave the fine untouched. This is the entire
+// security perimeter for async payment confirmation, so it gets a
+// dedicated assertion.
+func TestWebhook_RejectsBadSignature(t *testing.T) {
+	env := testkit.Setup(t)
+	pay := &fakePay{DevStub: payments.NewDevStub(),
+		verifyErr: payments.ErrSignatureInvalid}
+	h := buildWithPay(env, pay)
+
+	_, plate := newVehicle(t, env)
+	fineID, _ := issuePendingPayment(t, env, h, plate)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines/payments/webhooks/dev-stub",
+		`{"intent":"x"}`, ""))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	var status string
+	if err := env.QueryRow(
+		`SELECT status::text FROM fines WHERE id=$1`, fineID).
+		Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status == "paid" {
+		t.Fatalf("fine became paid despite invalid signature: status=%s", status)
+	}
+}
+
+// TestWebhook_UnknownIntent: a verified payload that doesn't match any
+// fine_payments row is acked (202) so the provider stops retrying, but
+// nothing is mutated.
+func TestWebhook_UnknownIntent(t *testing.T) {
+	env := testkit.Setup(t)
+	pay := &fakePay{DevStub: payments.NewDevStub(),
+		out: &payments.WebhookEvent{
+			ID: "evt_1", IntentID: "intent_does_not_exist",
+			Status: payments.StatusSucceeded,
+		}}
+	h := buildWithPay(env, pay)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines/payments/webhooks/dev-stub", `{}`, ""))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("want 202, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestWebhook_MarksPaidIdempotent: a verified succeeded webhook
+// transitions the fine pending→paid, writes the fine.paid event, and
+// is a no-op on a second delivery (replay). Both properties matter:
+// missing the first delivery means citizens stay in collections;
+// double-applying the second means double-counted demerits.
+func TestWebhook_MarksPaidIdempotent(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+
+	pay := &fakePay{DevStub: payments.NewDevStub(),
+		wantSig: "good"}
+	h := buildWithPay(env, pay)
+	fineID, intentID := issuePendingPayment(t, env, h, plate)
+	pay.out = &payments.WebhookEvent{
+		ID: "evt_1", IntentID: intentID,
+		Status: payments.StatusSucceeded,
+	}
+
+	post := func(sig string) *httptest.ResponseRecorder {
+		r := env.Req("POST", "/v1/fines/payments/webhooks/dev-stub", `{}`, "")
+		r.Header.Set("X-Sig", sig)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec
+	}
+
+	rec := post("good")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first webhook: want 200, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	var fineStatus, payStatus string
+	if err := env.QueryRow(
+		`SELECT f.status::text, fp.status
+		   FROM fines f JOIN fine_payments fp ON fp.fine_id=f.id
+		  WHERE f.id=$1`, fineID).
+		Scan(&fineStatus, &payStatus); err != nil {
+		t.Fatal(err)
+	}
+	if fineStatus != "paid" || payStatus != "succeeded" {
+		t.Fatalf("after webhook: fine=%s pay=%s", fineStatus, payStatus)
+	}
+
+	// fine.paid event landed in the outbox.
+	var outboxRows int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM event_outbox
+		  WHERE tenant_id=$1 AND envelope->>'type'='fine.paid'`, env.Tenant).
+		Scan(&outboxRows); err != nil {
+		t.Fatal(err)
+	}
+	if outboxRows != 1 {
+		t.Fatalf("want 1 fine.paid event, got %d", outboxRows)
+	}
+
+	// Replay: must be 202 and must NOT add another outbox event.
+	rec = post("good")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("replay: want 202, got %d %s", rec.Code, rec.Body.String())
+	}
+	if err := env.QueryRow(
+		`SELECT count(*) FROM event_outbox
+		  WHERE tenant_id=$1 AND envelope->>'type'='fine.paid'`, env.Tenant).
+		Scan(&outboxRows); err != nil {
+		t.Fatal(err)
+	}
+	if outboxRows != 1 {
+		t.Fatalf("replay added events: count=%d", outboxRows)
 	}
 }

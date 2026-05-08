@@ -11,6 +11,7 @@ package api
 
 import (
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -30,21 +31,30 @@ import (
 )
 
 type API struct {
-	cfg     config.Service
-	log     *slog.Logger
-	pool    *pgxpool.Pool
-	issuer  *auth.Issuer
-	audit   *audit.Client
-	pay     payments.Provider
-	hm      *connectors.HealthMonitor
-	bus     events.Publisher
+	cfg       config.Service
+	log       *slog.Logger
+	pool      *pgxpool.Pool
+	adminPool *pgxpool.Pool
+	issuer    *auth.Issuer
+	audit     *audit.Client
+	pay       payments.Provider
+	hm        *connectors.HealthMonitor
+	bus       events.Publisher
 }
 
-func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
+// New wires the fines API.
+//
+// adminPool is a pgxpool.Pool whose underlying DB role bypasses RLS;
+// it's only used by the payment webhook handler, which has no JWT and
+// therefore can't satisfy the per-tenant policies the request handlers
+// rely on. In production, callers may pass the same pool twice if the
+// runtime DB user already has BYPASSRLS — tests pass a separate
+// BYPASSRLS pool.
+func New(cfg config.Service, log *slog.Logger, pool, adminPool *pgxpool.Pool,
 	issuer *auth.Issuer, audit *audit.Client,
 	pay payments.Provider, hm *connectors.HealthMonitor, bus events.Publisher) http.Handler {
-	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, audit: audit,
-		pay: pay, hm: hm, bus: bus}
+	a := &API{cfg: cfg, log: log, pool: pool, adminPool: adminPool,
+		issuer: issuer, audit: audit, pay: pay, hm: hm, bus: bus}
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:create")(http.HandlerFunc(a.issue))))
 	mux.Handle("GET  /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:read")(http.HandlerFunc(a.list))))
@@ -55,6 +65,14 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	mux.Handle("POST /v1/fines/{id}/cancel",  issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.cancel))))
 	mux.Handle("GET  /v1/fines/payments/health",
 		issuer.Middleware(http.HandlerFunc(a.paymentsHealth)))
+	// Provider webhooks are unauthenticated by client JWT — the proof is
+	// the signature on the body. RequirePermission would deny them
+	// outright, so this route deliberately bypasses issuer.Middleware.
+	// The path is namespaced under /payments/ to avoid colliding with
+	// POST /v1/fines/{id}/pay (which would otherwise match
+	// /v1/fines/webhooks/X with {id}="webhooks").
+	mux.Handle("POST /v1/fines/payments/webhooks/{provider}",
+		http.HandlerFunc(a.handleWebhook))
 	return mux
 }
 
@@ -661,6 +679,137 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = a.audit.Emit(r.Context(), "fine.cancel", "fine", id.String(), nil, in)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleWebhook accepts a provider-signed payment notification, verifies
+// the signature via the bound payments.Provider, and atomically marks
+// the matching fine paid + writes a fine.paid event to the outbox.
+//
+// Authentication is by signature, not JWT. {provider} in the URL must
+// match the bound provider's identity — anything else is rejected
+// before we even read the body.
+//
+// Idempotency: the same intent ID arriving twice is a no-op. Real
+// providers retry aggressively, so this matters in production.
+//
+// Tenant: the fine's tenant_id is read out of fine_payments → fines;
+// the webhook itself has no JWT, so we trust the row we look up.
+func (a *API) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	if got := r.PathValue("provider"); got != a.pay.Info().Provider {
+		httpx.WriteErr(w, httpx.Err(http.StatusNotFound, "unknown_provider",
+			"no payments provider bound for "+got))
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		httpx.WriteErr(w, httpx.Err(http.StatusBadRequest, "read_failed", err.Error()))
+		return
+	}
+	headers := map[string]string{}
+	for k := range r.Header {
+		headers[k] = r.Header.Get(k)
+	}
+
+	evt, err := a.pay.VerifyWebhook(r.Context(), headers, body)
+	if err != nil {
+		// Treat any verify failure as a signature problem (401). The
+		// provider will retry; logging the upstream payload would leak
+		// secrets, so just stamp the failure on the health monitor.
+		info := a.pay.Info()
+		if a.hm != nil {
+			_ = a.hm.Fail(r.Context(), "", info.Module, info.Provider, info.Region, err.Error())
+		}
+		httpx.WriteErr(w, httpx.Err(http.StatusUnauthorized, "signature_invalid", err.Error()))
+		return
+	}
+
+	// Only "succeeded" transitions the fine. Other statuses (processing,
+	// failed, refunded) are recorded against the fine_payments row but
+	// don't mutate fines.status here — refund flows live elsewhere.
+	if evt.Status != payments.StatusSucceeded {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	// Webhooks have no JWT and therefore no app_tenant — handler runs
+	// against the admin pool (BYPASSRLS) so RLS doesn't hide the
+	// fine_payments row we need to look up by provider_ref.
+	conn, err := a.adminPool.Acquire(r.Context())
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer conn.Release()
+	tx, err := conn.Begin(r.Context())
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	var fineID uuid.UUID
+	var tenantID, payStatus, fineStatus, amount, currency, method string
+	err = tx.QueryRow(r.Context(),
+		`SELECT fp.fine_id, f.tenant_id, fp.status, f.status::text,
+		        fp.amount::text, fp.currency, fp.method
+		   FROM fine_payments fp
+		   JOIN fines f ON f.id = fp.fine_id
+		  WHERE fp.provider_ref = $1
+		  FOR UPDATE`, evt.IntentID).
+		Scan(&fineID, &tenantID, &payStatus, &fineStatus, &amount, &currency, &method)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Provider sent a webhook for an intent we don't track. ACK so
+		// they stop retrying, but log it.
+		a.log.Warn("webhook for unknown intent",
+			slog.String("intent", evt.IntentID),
+			slog.String("provider", a.pay.Info().Provider))
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+
+	// Idempotency guard: already paid → 202 and out.
+	if payStatus == "succeeded" || fineStatus == "paid" {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	if _, err := tx.Exec(r.Context(),
+		`UPDATE fine_payments SET status='succeeded', paid_at=now() WHERE provider_ref=$1`,
+		evt.IntentID); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	if _, err := tx.Exec(r.Context(),
+		`UPDATE fines SET status='paid', paid_at=now() WHERE id=$1`, fineID); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	env := events.NewEnvelope("fines", tenantID, events.TypeFinePaid, 1,
+		events.FinePaidPayload{
+			FineID: fineID.String(), Amount: amount, Currency: currency,
+			Method: method, ProviderRef: evt.IntentID,
+		})
+	if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	info := a.pay.Info()
+	if a.hm != nil {
+		_ = a.hm.OK(r.Context(), tenantID, info.Module, info.Provider, info.Region, nil)
+	}
+	_ = a.audit.Emit(r.Context(), "fine.pay.webhook", "fine", fineID.String(), nil,
+		map[string]any{"intent": evt.IntentID, "provider": info.Provider})
+
+	w.WriteHeader(http.StatusOK)
 }
 
 // paymentsHealth surfaces the per-tenant fail-streak for the bound
