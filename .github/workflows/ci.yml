@@ -69,6 +69,10 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://naditos:naditos@localhost:5432/naditos?sslmode=disable
         run: |
+          # packages/go-common's tests are pure (anpr OpenALPR adapter
+          # against httptest.NewServer, etc.) but live alongside service
+          # code — run them here for one consolidated test pass.
+          (cd packages/go-common && go test ./... -count=1)
           for s in services/*/; do
             (cd "$s" && go test ./... -count=1)
           done
