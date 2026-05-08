@@ -236,3 +236,101 @@ func TestConsumer_AdvancesPastFailedSends(t *testing.T) {
 		t.Fatalf("want failed/provider down, got status=%s err=%s", status, lastErr)
 	}
 }
+
+// seedLicenseAndCitizen seeds a driver license linked to a citizen user
+// and returns (licenseID, citizenEmail).
+func seedLicenseAndCitizen(t *testing.T, env *testkit.Env) (string, string) {
+	t.Helper()
+	uid := uuid.New()
+	email := fmt.Sprintf("%s@%s", uid.String()[:8], env.Tenant)
+	env.Exec(`INSERT INTO users (id, tenant_id, email, password_hash, full_name)
+	         VALUES ($1, $2, $3, '!', 'Test Driver')`,
+		uid, env.Tenant, email)
+
+	lid := uuid.New()
+	env.Exec(`INSERT INTO driver_licenses (id, tenant_id, user_id, license_number,
+	             full_name, classes, issued_at, expires_at)
+	         VALUES ($1, $2, $3, $4, 'Test Driver', $5, '2020-01-01', '2030-01-01')`,
+		lid, env.Tenant, uid, "DL-"+lid.String()[:6], []string{"B"})
+	return lid.String(), email
+}
+
+// TestConsumer_LicenseSuspended_SendsNotification: emit license.suspended
+// → consumer renders the message → dev-stub sender called.
+func TestConsumer_LicenseSuspended_SendsNotification(t *testing.T) {
+	env := testkit.Setup(t)
+	lid, email := seedLicenseAndCitizen(t, env)
+
+	sender := &captureSender{}
+	c := consumer.New(env.AdminPool(), discardLogger(), sender)
+	eid := writeOutbox(t, env, events.Envelope{
+		ID: uuid.NewString(), Type: events.TypeLicenseSuspended, Version: 1,
+		Source: "license", TenantID: env.Tenant, OccurredAt: time.Now().UTC(),
+		Data: events.LicenseSuspendedPayload{
+			LicenseID: lid, Reason: "demerit threshold reached",
+			TriggerKind: "demerit",
+			StartsAt:    "2026-05-01T00:00:00Z",
+			EndsAt:      "2026-11-01T00:00:00Z",
+		},
+	})
+	drainOnce(t, env, c, eid)
+
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.out) != 1 {
+		t.Fatalf("want 1 send, got %d", len(sender.out))
+	}
+	if sender.out[0].To != email {
+		t.Fatalf("recipient: want %s got %s", email, sender.out[0].To)
+	}
+	if !strings.Contains(sender.out[0].Subject, "suspended") {
+		t.Fatalf("subject: %q", sender.out[0].Subject)
+	}
+	if !strings.Contains(sender.out[0].Body, "demerit threshold reached") {
+		t.Fatalf("body missing reason: %q", sender.out[0].Body)
+	}
+}
+
+// TestConsumer_LicenseReinstated_SendsNotification: closes the demerit
+// loop. The lift handler emits license.reinstated; the citizen gets a
+// "you can drive again" message.
+func TestConsumer_LicenseReinstated_SendsNotification(t *testing.T) {
+	env := testkit.Setup(t)
+	lid, email := seedLicenseAndCitizen(t, env)
+
+	sender := &captureSender{}
+	c := consumer.New(env.AdminPool(), discardLogger(), sender)
+	eid := writeOutbox(t, env, events.Envelope{
+		ID: uuid.NewString(), Type: events.TypeLicenseReinstated, Version: 1,
+		Source: "license", TenantID: env.Tenant, OccurredAt: time.Now().UTC(),
+		Data: events.LicenseReinstatedPayload{
+			LicenseID:    lid,
+			SuspensionID: uuid.NewString(),
+		},
+	})
+	drainOnce(t, env, c, eid)
+
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.out) != 1 {
+		t.Fatalf("want 1 send, got %d", len(sender.out))
+	}
+	if sender.out[0].To != email {
+		t.Fatalf("recipient: want %s got %s", email, sender.out[0].To)
+	}
+	if !strings.Contains(sender.out[0].Subject, "reinstated") {
+		t.Fatalf("subject: %q", sender.out[0].Subject)
+	}
+
+	// notification_records row exists with the correct template.
+	var template string
+	if err := env.QueryRow(
+		`SELECT template FROM notification_records
+		   WHERE tenant_id=$1 AND related_event=$2`,
+		env.Tenant, eid).Scan(&template); err != nil {
+		t.Fatal(err)
+	}
+	if template != "license.reinstated.v1" {
+		t.Fatalf("template: %s", template)
+	}
+}

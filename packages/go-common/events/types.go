@@ -116,6 +116,12 @@ type LicenseSuspendedPayload struct {
 	EndsAt       string `json:"ends_at,omitempty"`
 }
 
+type LicenseReinstatedPayload struct {
+	LicenseID     string `json:"license_id"`
+	SuspensionID  string `json:"suspension_id"`
+	LiftedReason  string `json:"lifted_reason,omitempty"`
+}
+
 type LicenseDemeritPayload struct {
 	LicenseID    string `json:"license_id"`
 	Delta        int    `json:"delta"`

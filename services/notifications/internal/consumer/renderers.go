@@ -30,9 +30,10 @@ type renderer struct {
 // renderers is the registry mapping event types to their renderer.
 // New event subscribers are added here.
 var renderers = map[string]renderer{
-	events.TypeFineIssued:      fineIssuedRenderer,
-	events.TypeFinePaid:        finePaidRenderer,
+	events.TypeFineIssued:       fineIssuedRenderer,
+	events.TypeFinePaid:         finePaidRenderer,
 	events.TypeLicenseSuspended: licenseSuspendedRenderer,
+	events.TypeLicenseReinstated: licenseReinstatedRenderer,
 }
 
 // ─── Resolvers ──────────────────────────────────────────────────────────────
@@ -169,6 +170,29 @@ var licenseSuspendedRenderer = renderer{
 				"Until: %s\n\n"+
 				"NADITOS",
 			r.Name, p.Reason, p.StartsAt, p.EndsAt)
+		return subject, body
+	},
+}
+
+// licenseReinstatedRenderer closes the demerit loop: when the lift
+// handler clears a suspension we tell the citizen they can drive again.
+var licenseReinstatedRenderer = renderer{
+	template: "license.reinstated.v1",
+	resolve: func(ctx context.Context, tx pgx.Tx, env events.Envelope) (*recipient, error) {
+		var p events.LicenseReinstatedPayload
+		if err := decodeData(env.Data, &p); err != nil {
+			return nil, err
+		}
+		return resolveByLicense(ctx, tx, env.TenantID, p.LicenseID)
+	},
+	render: func(env events.Envelope, r *recipient) (string, string) {
+		subject := "Driver license reinstated"
+		body := fmt.Sprintf(
+			"Hello %s,\n\n"+
+				"Good news — your driver license has been reinstated and is "+
+				"valid for use immediately.\n\n"+
+				"NADITOS",
+			r.Name)
 		return subject, body
 	},
 }

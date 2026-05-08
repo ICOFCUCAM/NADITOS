@@ -126,8 +126,12 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	conn, err := db.WithTenant(r.Context(), a.pool)
 	if err != nil { httpx.WriteErr(w, err); return }
 	defer conn.Release()
+	tx, err := conn.Begin(r.Context())
+	if err != nil { httpx.WriteErr(w, err); return }
+	defer tx.Rollback(r.Context())
+
 	var id uuid.UUID
-	err = conn.QueryRow(r.Context(),
+	err = tx.QueryRow(r.Context(),
 		`INSERT INTO driver_licenses
 		   (tenant_id, user_id, license_number, full_name, date_of_birth,
 		    classes, issued_at, expires_at)
@@ -137,17 +141,21 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		in.Classes, in.IssuedAt, in.ExpiresAt,
 	).Scan(&id)
 	if err != nil { httpx.WriteErr(w, err); return }
-	_ = a.audit.Emit(r.Context(), "license.create", "driver_license", id.String(), nil, in)
+
 	uid := ""
 	if in.UserID != nil { uid = in.UserID.String() }
-	env := events.NewEnvelope("license", c.TenantID, events.TypeLicenseIssued, 1,
+	env := events.EnvelopeFromContext(r.Context(),
+		"license", c.TenantID, events.TypeLicenseIssued, 1,
 		events.LicenseIssuedPayload{
 			LicenseID: id.String(), LicenseNumber: in.LicenseNumber,
 			UserID: uid, Classes: in.Classes,
 		})
-	env.ActorID = c.Subject
-	env.ActorRole = c.Role
-	_ = a.bus.Publish(r.Context(), env)
+	if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+		httpx.WriteErr(w, err); return
+	}
+	if err := tx.Commit(r.Context()); err != nil { httpx.WriteErr(w, err); return }
+
+	_ = a.audit.Emit(r.Context(), "license.create", "driver_license", id.String(), nil, in)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": id.String()})
 }
 
@@ -306,17 +314,18 @@ func (a *API) addSuspension(w http.ResponseWriter, r *http.Request) {
 		 WHERE id=$1`, id, in.EndsAt); err != nil {
 		httpx.WriteErr(w, err); return
 	}
-	if err := tx.Commit(r.Context()); err != nil { httpx.WriteErr(w, err); return }
-
-	_ = a.audit.Emit(r.Context(), "license.suspend", "driver_license", id.String(), nil, in)
-	env := events.NewEnvelope("license", c.TenantID, events.TypeLicenseSuspended, 1,
+	env := events.EnvelopeFromContext(r.Context(),
+		"license", c.TenantID, events.TypeLicenseSuspended, 1,
 		events.LicenseSuspendedPayload{
 			LicenseID: id.String(), Reason: in.Reason, TriggerKind: in.TriggerKind,
 			StartsAt: deref(in.StartsAt), EndsAt: deref(in.EndsAt),
 		})
-	env.ActorID = c.Subject
-	env.ActorRole = c.Role
-	_ = a.bus.Publish(r.Context(), env)
+	if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+		httpx.WriteErr(w, err); return
+	}
+	if err := tx.Commit(r.Context()); err != nil { httpx.WriteErr(w, err); return }
+
+	_ = a.audit.Emit(r.Context(), "license.suspend", "driver_license", id.String(), nil, in)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": sid.String()})
 }
 
@@ -346,14 +355,18 @@ func (a *API) liftSuspension(w http.ResponseWriter, r *http.Request) {
 		        AND (ends_at IS NULL OR ends_at > now()))`, id); err != nil {
 		httpx.WriteErr(w, err); return
 	}
+	env := events.EnvelopeFromContext(r.Context(),
+		"license", c.TenantID, events.TypeLicenseReinstated, 1,
+		events.LicenseReinstatedPayload{
+			LicenseID:    id.String(),
+			SuspensionID: sid.String(),
+		})
+	if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+		httpx.WriteErr(w, err); return
+	}
 	if err := tx.Commit(r.Context()); err != nil { httpx.WriteErr(w, err); return }
 	_ = a.audit.Emit(r.Context(), "license.reinstate", "driver_license", id.String(), nil,
 		map[string]string{"suspension_id": sid.String()})
-	env := events.NewEnvelope("license", c.TenantID, events.TypeLicenseReinstated, 1,
-		map[string]string{"license_id": id.String(), "suspension_id": sid.String()})
-	env.ActorID = c.Subject
-	env.ActorRole = c.Role
-	_ = a.bus.Publish(r.Context(), env)
 	w.WriteHeader(http.StatusNoContent)
 }
 
