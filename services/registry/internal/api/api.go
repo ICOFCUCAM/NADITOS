@@ -15,6 +15,7 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
 	"github.com/icofcucam/naditos/packages/go-common/db"
+	"github.com/icofcucam/naditos/packages/go-common/events"
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
 )
 
@@ -24,11 +25,12 @@ type API struct {
 	pool   *pgxpool.Pool
 	issuer *auth.Issuer
 	audit  *audit.Client
+	bus    events.Publisher
 }
 
 func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
-	issuer *auth.Issuer, audit *audit.Client) http.Handler {
-	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, audit: audit}
+	issuer *auth.Issuer, audit *audit.Client, bus events.Publisher) http.Handler {
+	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, audit: audit, bus: bus}
 
 	root := http.NewServeMux()
 	root.Handle("GET  /v1/vehicles",                issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.list))))
@@ -173,6 +175,15 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.audit.Emit(r.Context(), "vehicle.create", "vehicle", id.String(), nil, in)
+	owner := ""
+	if in.OwnerID != nil {
+		owner = in.OwnerID.String()
+	}
+	env := events.NewEnvelope("registry", c.TenantID, events.TypeVehicleCreated, 1,
+		events.VehicleCreatedPayload{VehicleID: id.String(), Plate: in.Plate, OwnerID: owner})
+	env.ActorID = c.Subject
+	env.ActorRole = c.Role
+	_ = a.bus.Publish(r.Context(), env)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": id.String()})
 }
 
@@ -312,6 +323,22 @@ func (a *API) setFlags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.audit.Emit(r.Context(), "vehicle.flags", "vehicle", id.String(), nil, in)
+
+	// Re-read flags to publish a fully-populated event.
+	c := auth.ClaimsFrom(r.Context())
+	var plate string
+	var stolen, seized, wanted bool
+	_ = conn.QueryRow(r.Context(),
+		`SELECT plate, is_stolen, is_seized, is_wanted FROM vehicles WHERE id=$1`, id).
+		Scan(&plate, &stolen, &seized, &wanted)
+	env := events.NewEnvelope("registry", c.TenantID, events.TypeVehicleFlagged, 1,
+		events.VehicleFlaggedPayload{
+			VehicleID: id.String(), Plate: plate,
+			IsStolen: stolen, IsSeized: seized, IsWanted: wanted,
+		})
+	env.ActorID = c.Subject
+	env.ActorRole = c.Role
+	_ = a.bus.Publish(r.Context(), env)
 	w.WriteHeader(http.StatusNoContent)
 }
 

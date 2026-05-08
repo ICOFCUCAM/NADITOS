@@ -7,6 +7,7 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
 	"github.com/icofcucam/naditos/packages/go-common/db"
+	"github.com/icofcucam/naditos/packages/go-common/events"
 	"github.com/icofcucam/naditos/packages/go-common/logger"
 	"github.com/icofcucam/naditos/packages/go-common/server"
 	"github.com/icofcucam/naditos/services/registry/internal/api"
@@ -26,8 +27,9 @@ func main() {
 
 	issuer := auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
 	auditCl := audit.New(cfg.AuditURL, "registry")
+	bus := events.NewInProc(log)
 
-	h := api.New(cfg, log, pool, issuer, auditCl)
+	h := api.New(cfg, log, pool, issuer, auditCl, bus)
 	if err := server.Run(ctx, log, cfg.Port, h); err != nil {
 		log.Error("server exited", "err", err)
 	}

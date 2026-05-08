@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-SERVICES := auth registry license insurance inspection fines audit anpr-gateway notifications
+SERVICES := auth registry license insurance inspection fines audit anpr-gateway notifications gateway
 APPS     := web-admin police-pwa web-citizen
 
 # ─── Help ───────────────────────────────────────────────────────────────

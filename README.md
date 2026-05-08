@@ -23,6 +23,7 @@ enforcement, and fine management.
 | ANPR Gateway          | `anpr-gateway`   | scaffold    |
 | Audit Log             | `audit`          | implemented |
 | Notifications         | `notifications`  | scaffold    |
+| API gateway           | `gateway`        | implemented |
 
 ## Apps
 

@@ -1,6 +1,9 @@
-# Minimal Ingress that fronts the Go services. In production swap for an
-# API gateway (Kong / Envoy / Traefik) with auth verification, rate limits,
-# WAF, and per-tenant routing.
+# All client traffic enters via the NADITOS gateway service. The gateway
+# does JWT verification, per-tenant rate limiting, request-id injection,
+# CORS, structured logging, and reverse proxies to the right upstream.
+#
+# In production layer a real WAF + LB in front (Cloud Armor / Cloudflare /
+# sovereign equivalent). Per-service Ingresses should NOT be exposed.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -8,24 +11,13 @@ metadata:
   namespace: naditos
   annotations:
     nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
 spec:
   ingressClassName: nginx
   rules:
     - host: api.naditos.example
       http:
         paths:
-          - path: /v1/auth
+          - path: /
             pathType: Prefix
-            backend: { service: { name: auth,     port: { number: 8001 } } }
-          - path: /v1/admin/users
-            pathType: Prefix
-            backend: { service: { name: auth,     port: { number: 8001 } } }
-          - path: /v1/vehicles
-            pathType: Prefix
-            backend: { service: { name: registry, port: { number: 8002 } } }
-          - path: /v1/fines
-            pathType: Prefix
-            backend: { service: { name: fines,    port: { number: 8006 } } }
-          - path: /v1/audit
-            pathType: Prefix
-            backend: { service: { name: audit,    port: { number: 8007 } } }
+            backend: { service: { name: gateway, port: { number: 8080 } } }

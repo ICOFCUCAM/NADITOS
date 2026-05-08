@@ -134,6 +134,62 @@ Police PWA caches:
 Server reconciles drafts: re-validates evidence, re-applies regulation
 engine, rejects duplicates, returns canonical fine IDs.
 
+## Integration contracts
+
+External systems are accessed through Go interfaces in
+`packages/go-common/contracts/`:
+
+| Contract        | Phase-1 adapter | Phase-2 swap                                |
+| --------------- | --------------- | ------------------------------------------- |
+| `payments`      | `dev-stub`      | Stripe, Adyen, treasury connectors          |
+| `anpr`          | `dev-stub`      | OpenALPR, PlateRecognizer, in-house CV      |
+| `insurance`     | `dev-stub`      | National bureau, EU Green Card, aggregators |
+| `court`         | `dev-stub`      | Per-country judicial APIs                   |
+| `notifications` | `dev-stub`      | Twilio, Vonage, sovereign SMS gateways      |
+| `storage`       | `dev-stub`      | S3, GCS, Azure Blob, MinIO                  |
+| `identity`      | (interface only)| eIDAS, BankID, MyInfo, civil registry       |
+
+A service depends only on the interface; main() wires whichever
+implementation the operator selects per tenant. Adapters expose
+`Info()` so `/healthz` reports which provider is active.
+
+## Domain events
+
+Services broadcast typed events via `packages/go-common/events.Publisher`.
+Phase-1 ships an `InProc` publisher (synchronous in-process dispatch);
+production deployments swap in NATS, Kafka, or Pub/Sub without changing
+producer code.
+
+Event envelope:
+
+```json
+{ "id":"…", "type":"fine.issued", "version":1,
+  "source":"fines", "tenant_id":"NO",
+  "occurred_at":"…", "actor_id":"…", "actor_role":"officer",
+  "data":{ … typed payload … } }
+```
+
+Stable types and payloads live in `events/types.go`. Currently emitted:
+`fine.issued`, `fine.paid`, `fine.cancelled`, `fine.disputed`,
+`vehicle.created`, `vehicle.flagged`. Add new types there, never inline.
+
+## API gateway
+
+`services/gateway` is a Go reverse proxy that fronts every Go service.
+Per request it:
+
+1. injects `X-Request-Id`,
+2. handles CORS preflight,
+3. verifies the JWT at the edge for protected routes (defense-in-depth —
+   each service re-verifies),
+4. checks role (`NeedsRole` per route),
+5. enforces a token-bucket rate limit per `(tenant, route)`,
+6. proxies to the matching upstream.
+
+Routes are declared in `services/gateway/internal/proxy/routes.go`. The
+ingress in `deploy/k8s/40-gateway.yaml` directs all `/v1/*` traffic to
+the gateway; per-service Ingresses are not exposed.
+
 ## Deployability
 
 - Every service ships a `Dockerfile` and a `deploy/k8s/<service>.yaml`

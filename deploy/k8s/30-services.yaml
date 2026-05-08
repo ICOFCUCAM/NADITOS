@@ -117,6 +117,44 @@ metadata: { name: audit, namespace: naditos }
 spec: { selector: { app: audit }, ports: [{ port: 8007, targetPort: 8007 }] }
 ---
 # ── HPAs ────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: gateway, namespace: naditos }
+spec:
+  replicas: 3
+  selector: { matchLabels: { app: gateway } }
+  template:
+    metadata: { labels: { app: gateway } }
+    spec:
+      containers:
+        - name: gateway
+          image: REGISTRY/naditos-gateway:latest
+          ports: [{ containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: naditos-config }
+            - secretRef:    { name: naditos-secrets }
+          env:
+            - { name: SERVICE_PORT,      value: "8080" }
+            - { name: AUTH_URL,          value: "http://auth:8001" }
+            - { name: REGISTRY_URL,      value: "http://registry:8002" }
+            - { name: LICENSE_URL,       value: "http://license:8003" }
+            - { name: INSURANCE_URL,     value: "http://insurance:8004" }
+            - { name: INSPECTION_URL,    value: "http://inspection:8005" }
+            - { name: FINES_URL,         value: "http://fines:8006" }
+            - { name: AUDIT_URL,         value: "http://audit:8007" }
+            - { name: ANPR_URL,          value: "http://anpr-gateway:8008" }
+            - { name: NOTIFICATIONS_URL, value: "http://notifications:8009" }
+          readinessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 5 }
+          livenessProbe:  { httpGet: { path: /livez,   port: 8080 }, periodSeconds: 10 }
+          resources:
+            requests: { cpu: "200m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "256Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: gateway, namespace: naditos }
+spec: { selector: { app: gateway }, ports: [{ port: 8080, targetPort: 8080 }] }
+---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata: { name: registry, namespace: naditos }

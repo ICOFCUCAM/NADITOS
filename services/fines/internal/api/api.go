@@ -22,27 +22,32 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/audit"
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
+	"github.com/icofcucam/naditos/packages/go-common/contracts/payments"
 	"github.com/icofcucam/naditos/packages/go-common/db"
+	"github.com/icofcucam/naditos/packages/go-common/events"
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
 )
 
 type API struct {
-	cfg    config.Service
-	log    *slog.Logger
-	pool   *pgxpool.Pool
-	issuer *auth.Issuer
-	audit  *audit.Client
+	cfg     config.Service
+	log     *slog.Logger
+	pool    *pgxpool.Pool
+	issuer  *auth.Issuer
+	audit   *audit.Client
+	pay     payments.Provider
+	bus     events.Publisher
 }
 
 func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
-	issuer *auth.Issuer, audit *audit.Client) http.Handler {
-	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, audit: audit}
+	issuer *auth.Issuer, audit *audit.Client,
+	pay payments.Provider, bus events.Publisher) http.Handler {
+	a := &API{cfg: cfg, log: log, pool: pool, issuer: issuer, audit: audit, pay: pay, bus: bus}
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:create")(http.HandlerFunc(a.issue))))
 	mux.Handle("GET  /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:read")(http.HandlerFunc(a.list))))
 	mux.Handle("GET  /v1/fines/mine",     issuer.Middleware(http.HandlerFunc(a.listMine)))
 	mux.Handle("GET  /v1/fines/{id}",     issuer.Middleware(auth.RequirePermission("fines:read")(http.HandlerFunc(a.get))))
-	mux.Handle("POST /v1/fines/{id}/pay", issuer.Middleware(http.HandlerFunc(a.pay)))
+	mux.Handle("POST /v1/fines/{id}/pay", issuer.Middleware(http.HandlerFunc(a.handlePay)))
 	mux.Handle("POST /v1/fines/{id}/dispute", issuer.Middleware(http.HandlerFunc(a.dispute)))
 	mux.Handle("POST /v1/fines/{id}/cancel",  issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.cancel))))
 	return mux
@@ -219,6 +224,23 @@ func (a *API) issue(w http.ResponseWriter, r *http.Request) {
 		"geo":          [2]float64{in.GeoLat, in.GeoLng},
 	})
 
+	// Publish domain event — downstream services (notifications, analytics,
+	// fraud detection) subscribe without coupling to fines.
+	vehStr := ""
+	if vehicleID != nil {
+		vehStr = vehicleID.String()
+	}
+	env := events.NewEnvelope("fines", c.TenantID, events.TypeFineIssued, 1,
+		events.FineIssuedPayload{
+			FineID: id.String(), Plate: in.Plate, VehicleID: vehStr,
+			OffenceCode: in.OffenceCode, Amount: amount, Currency: currency,
+			IssuedBy: issuedBy.String(), DeviceID: in.DeviceID,
+			GeoLat: in.GeoLat, GeoLng: in.GeoLng, EvidenceN: len(in.Evidence),
+		})
+	env.ActorID = c.Subject
+	env.ActorRole = c.Role
+	_ = a.bus.Publish(r.Context(), env)
+
 	httpx.WriteJSON(w, http.StatusCreated, fineOut{
 		ID: id, Plate: in.Plate, OffenceCode: in.OffenceCode,
 		Amount: amount, Currency: currency, Status: "issued",
@@ -340,7 +362,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── PAY / DISPUTE / CANCEL ────────────────────────────────────────────────
-func (a *API) pay(w http.ResponseWriter, r *http.Request) {
+func (a *API) handlePay(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteErr(w, httpx.ErrBadRequest)
@@ -381,28 +403,60 @@ func (a *API) pay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stub payment provider — in production this kicks Stripe / local provider.
-	providerRef := "DEV-" + uuid.NewString()
-
-	if _, err := tx.Exec(r.Context(),
-		`INSERT INTO fine_payments (fine_id, amount, currency, method, provider_ref, status, paid_at)
-		 VALUES ($1,$2::numeric,$3,$4,$5,'succeeded',now())`,
-		id, amount, currency, in.Method, providerRef); err != nil {
+	c := auth.ClaimsFrom(r.Context())
+	intent, err := a.pay.CreateIntent(r.Context(), payments.CreateIntentInput{
+		TenantID:       c.TenantID,
+		IdempotencyKey: "fine:" + id.String(),
+		Amount:         payments.Money{Amount: amount, Currency: currency},
+		Description:    "Traffic fine " + id.String(),
+		Method:         in.Method,
+		Metadata:       map[string]string{"fine_id": id.String()},
+	})
+	if err != nil {
 		httpx.WriteErr(w, err)
 		return
 	}
+	providerRef := intent.ID
+	status := "pending"
+	if intent.Status == payments.StatusSucceeded {
+		status = "succeeded"
+	}
+
 	if _, err := tx.Exec(r.Context(),
-		`UPDATE fines SET status='paid', paid_at=now() WHERE id=$1`, id); err != nil {
+		`INSERT INTO fine_payments (fine_id, amount, currency, method, provider_ref, status, paid_at)
+		 VALUES ($1,$2::numeric,$3,$4,$5,$6, CASE WHEN $6='succeeded' THEN now() END)`,
+		id, amount, currency, in.Method, providerRef, status); err != nil {
 		httpx.WriteErr(w, err)
 		return
+	}
+	if status == "succeeded" {
+		if _, err := tx.Exec(r.Context(),
+			`UPDATE fines SET status='paid', paid_at=now() WHERE id=$1`, id); err != nil {
+			httpx.WriteErr(w, err)
+			return
+		}
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		httpx.WriteErr(w, err)
 		return
 	}
 	_ = a.audit.Emit(r.Context(), "fine.pay", "fine", id.String(), nil,
-		map[string]any{"method": in.Method, "provider_ref": providerRef})
-	w.WriteHeader(http.StatusNoContent)
+		map[string]any{"method": in.Method, "provider_ref": providerRef, "status": status})
+	if status == "succeeded" {
+		env := events.NewEnvelope("fines", c.TenantID, events.TypeFinePaid, 1,
+			events.FinePaidPayload{
+				FineID: id.String(), Amount: amount, Currency: currency,
+				Method: in.Method, ProviderRef: providerRef,
+			})
+		env.ActorID = c.Subject
+		env.ActorRole = c.Role
+		_ = a.bus.Publish(r.Context(), env)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"intent_id":     intent.ID,
+		"client_secret": intent.ClientSecret,
+		"status":        status,
+	})
 }
 
 func (a *API) dispute(w http.ResponseWriter, r *http.Request) {
@@ -450,6 +504,11 @@ func (a *API) dispute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.audit.Emit(r.Context(), "fine.dispute", "fine", id.String(), nil, in)
+	env := events.NewEnvelope("fines", c.TenantID, events.TypeFineDisputed, 1,
+		events.FineDisputedPayload{FineID: id.String(), FiledBy: c.Subject, Reason: in.Reason})
+	env.ActorID = c.Subject
+	env.ActorRole = c.Role
+	_ = a.bus.Publish(r.Context(), env)
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -482,6 +541,12 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, err)
 		return
 	}
+	c := auth.ClaimsFrom(r.Context())
 	_ = a.audit.Emit(r.Context(), "fine.cancel", "fine", id.String(), nil, in)
+	env := events.NewEnvelope("fines", c.TenantID, events.TypeFineCancelled, 1,
+		events.FineCancelledPayload{FineID: id.String(), Reason: in.Reason})
+	env.ActorID = c.Subject
+	env.ActorRole = c.Role
+	_ = a.bus.Publish(r.Context(), env)
 	w.WriteHeader(http.StatusNoContent)
 }
