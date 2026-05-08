@@ -35,7 +35,8 @@ type Envelope struct {
 	OccurredAt time.Time `json:"occurred_at"`
 	ActorID    string    `json:"actor_id,omitempty"`
 	ActorRole  string    `json:"actor_role,omitempty"`
-	TraceID    string    `json:"trace_id,omitempty"`
+	TraceID    string    `json:"trace_id,omitempty"`     // W3C trace id for correlation
+	RequestID  string    `json:"request_id,omitempty"`   // X-Request-Id of originating request
 	Data       any       `json:"data"`
 }
 
@@ -64,4 +65,54 @@ func NewEnvelope(source, tenantID, eventType string, version int, data any) Enve
 		OccurredAt: time.Now().UTC(),
 		Data:       data,
 	}
+}
+
+// EnvelopeFromContext is NewEnvelope plus actor + trace propagation
+// pulled from the request context (set by observability.Middleware and
+// auth middleware). Use this in handlers; use NewEnvelope in workers
+// where there's no request context.
+func EnvelopeFromContext(ctx ContextLike, source, tenantID, eventType string, version int, data any) Envelope {
+	env := NewEnvelope(source, tenantID, eventType, version, data)
+	if c, ok := actorFrom(ctx); ok {
+		env.ActorID = c.subject
+		env.ActorRole = c.role
+	}
+	if id, ok := traceFrom(ctx); ok {
+		env.TraceID = id
+	}
+	return env
+}
+
+// ContextLike avoids importing context here from callers that prefer to
+// pass plain context.Context; both shapes work.
+type ContextLike interface {
+	Value(any) any
+}
+
+// actorFrom / traceFrom decouple the events package from the auth and
+// observability packages — those packages register the value extractors
+// at init() to avoid an import cycle.
+type actorClaims struct{ subject, role string }
+
+var (
+	actorExtractor func(ContextLike) (actorClaims, bool) = func(ContextLike) (actorClaims, bool) { return actorClaims{}, false }
+	traceExtractor func(ContextLike) (string, bool)      = func(ContextLike) (string, bool) { return "", false }
+)
+
+func actorFrom(ctx ContextLike) (actorClaims, bool) { return actorExtractor(ctx) }
+func traceFrom(ctx ContextLike) (string, bool)      { return traceExtractor(ctx) }
+
+// RegisterActorExtractor lets the auth package wire JWT claims lookup
+// without importing this package — call once at process init().
+func RegisterActorExtractor(fn func(ContextLike) (subject, role string, ok bool)) {
+	actorExtractor = func(ctx ContextLike) (actorClaims, bool) {
+		s, r, ok := fn(ctx)
+		return actorClaims{subject: s, role: r}, ok
+	}
+}
+
+// RegisterTraceExtractor lets the observability package wire trace-id
+// propagation without an import cycle.
+func RegisterTraceExtractor(fn func(ContextLike) (string, bool)) {
+	traceExtractor = fn
 }

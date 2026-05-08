@@ -23,7 +23,7 @@ func main() {
 	defer pool.Close()
 
 	h := api.New(cfg, log, pool)
-	if err := server.Run(ctx, log, cfg.Port, h); err != nil {
+	if err := server.Run(ctx, log, "audit", cfg.Port, h); err != nil {
 		log.Error("server exited", "err", err)
 	}
 }

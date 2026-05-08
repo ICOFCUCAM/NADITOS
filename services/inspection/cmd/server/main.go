@@ -53,7 +53,7 @@ func main() {
 		issuer.Middleware(http.HandlerFunc(healthHandler(router, health))))
 	mux.HandleFunc("POST /v1/inspection/webhooks/{provider}", webhookHandler(log))
 
-	if err := server.Run(ctx, log, cfg.Port, mux); err != nil {
+	if err := server.Run(ctx, log, "inspection", cfg.Port, mux); err != nil {
 		log.Error("server exited", "err", err)
 	}
 }

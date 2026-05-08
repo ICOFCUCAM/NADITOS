@@ -156,8 +156,15 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	defer conn.Release()
 
 	c := auth.ClaimsFrom(r.Context())
+	tx, err := conn.Begin(r.Context())
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
 	var id uuid.UUID
-	err = conn.QueryRow(r.Context(),
+	err = tx.QueryRow(r.Context(),
 		`INSERT INTO vehicles (
 			tenant_id, plate, vin, make, model, year, color, category,
 			emission_class, owner_id,
@@ -174,16 +181,21 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, err)
 		return
 	}
-	_ = a.audit.Emit(r.Context(), "vehicle.create", "vehicle", id.String(), nil, in)
 	owner := ""
 	if in.OwnerID != nil {
 		owner = in.OwnerID.String()
 	}
-	env := events.NewEnvelope("registry", c.TenantID, events.TypeVehicleCreated, 1,
+	env := events.EnvelopeFromContext(r.Context(), "registry", c.TenantID, events.TypeVehicleCreated, 1,
 		events.VehicleCreatedPayload{VehicleID: id.String(), Plate: in.Plate, OwnerID: owner})
-	env.ActorID = c.Subject
-	env.ActorRole = c.Role
-	_ = a.bus.Publish(r.Context(), env)
+	if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	_ = a.audit.Emit(r.Context(), "vehicle.create", "vehicle", id.String(), nil, in)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": id.String()})
 }
 
@@ -310,35 +322,48 @@ func (a *API) setFlags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Release()
-	_, err = conn.Exec(r.Context(),
+	tx, err := conn.Begin(r.Context())
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	if _, err := tx.Exec(r.Context(),
 		`UPDATE vehicles SET
 		   is_stolen = COALESCE($2, is_stolen),
 		   is_seized = COALESCE($3, is_seized),
 		   is_wanted = COALESCE($4, is_wanted),
 		   updated_at = now()
 		 WHERE id=$1`,
-		id, in.IsStolen, in.IsSeized, in.IsWanted)
-	if err != nil {
+		id, in.IsStolen, in.IsSeized, in.IsWanted); err != nil {
 		httpx.WriteErr(w, err)
 		return
 	}
-	_ = a.audit.Emit(r.Context(), "vehicle.flags", "vehicle", id.String(), nil, in)
 
-	// Re-read flags to publish a fully-populated event.
 	c := auth.ClaimsFrom(r.Context())
 	var plate string
 	var stolen, seized, wanted bool
-	_ = conn.QueryRow(r.Context(),
+	if err := tx.QueryRow(r.Context(),
 		`SELECT plate, is_stolen, is_seized, is_wanted FROM vehicles WHERE id=$1`, id).
-		Scan(&plate, &stolen, &seized, &wanted)
-	env := events.NewEnvelope("registry", c.TenantID, events.TypeVehicleFlagged, 1,
+		Scan(&plate, &stolen, &seized, &wanted); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	env := events.EnvelopeFromContext(r.Context(), "registry", c.TenantID, events.TypeVehicleFlagged, 1,
 		events.VehicleFlaggedPayload{
 			VehicleID: id.String(), Plate: plate,
 			IsStolen: stolen, IsSeized: seized, IsWanted: wanted,
 		})
-	env.ActorID = c.Subject
-	env.ActorRole = c.Role
-	_ = a.bus.Publish(r.Context(), env)
+	if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	_ = a.audit.Emit(r.Context(), "vehicle.flags", "vehicle", id.String(), nil, in)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -331,3 +331,93 @@ func TestFineIssue_NormalFlow_Persists(t *testing.T) {
 	// Suppress unused-time warning if the package gets pruned later.
 	_ = time.Second
 }
+
+// TestFineIssue_OutboxAtomic confirms the fine-issued event lands in
+// event_outbox in the same transaction as the fine + evidence rows.
+// If the outbox INSERT failed independently, this test would not see
+// the row at all.
+func TestFineIssue_OutboxAtomic(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	tok, _ := env.Token("officer", "fines:create")
+
+	rec := httptest.NewRecorder()
+	build(env).ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), tok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("issue: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+
+	// One row in event_outbox, undelivered, with type=fine.issued and
+	// the matching fine_id in the payload. A relay process drains it.
+	var (
+		count       int
+		envelopeRaw string
+	)
+	if err := env.QueryRow(
+		`SELECT count(*) FROM event_outbox
+		   WHERE tenant_id=$1 AND envelope->>'type'='fine.issued'
+		     AND envelope->'data'->>'fine_id'=$2`,
+		env.Tenant, out.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("want exactly 1 outbox row for fine.issued, got %d", count)
+	}
+	if err := env.QueryRow(
+		`SELECT envelope::text FROM event_outbox
+		   WHERE tenant_id=$1 AND envelope->>'type'='fine.issued'
+		     AND envelope->'data'->>'fine_id'=$2`,
+		env.Tenant, out.ID).Scan(&envelopeRaw); err != nil {
+		t.Fatal(err)
+	}
+	// pg JSONB output uses ": " separator; Contains skips whitespace.
+	if !strings.Contains(envelopeRaw, `"actor_role"`) ||
+		!strings.Contains(envelopeRaw, `"officer"`) {
+		t.Fatalf("envelope missing actor_role=officer: %s", envelopeRaw)
+	}
+
+	// And the row is undelivered until the relay drains it.
+	var delivered *time.Time
+	if err := env.QueryRow(
+		`SELECT delivered_at FROM event_outbox
+		   WHERE tenant_id=$1 AND envelope->'data'->>'fine_id'=$2`,
+		env.Tenant, out.ID).Scan(&delivered); err != nil {
+		t.Fatal(err)
+	}
+	if delivered != nil {
+		t.Fatalf("expected undelivered, got %v", *delivered)
+	}
+}
+
+// TestFineIssue_OutboxRollsBackOnFailure: when the duplicate-protection
+// check rejects a request, the outbox row from the rejected attempt is
+// also absent. (The first issue creates one outbox row; the second is
+// 409 and must not double the count.)
+func TestFineIssue_OutboxRollsBackOnFailure(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	tok, _ := env.Token("officer", "fines:create")
+
+	for i, want := range []int{http.StatusCreated, http.StatusConflict} {
+		rec := httptest.NewRecorder()
+		build(env).ServeHTTP(rec, env.Req("POST", "/v1/fines",
+			validIssueBody(plate, "INS_EXPIRED"), tok))
+		if rec.Code != want {
+			t.Fatalf("issue %d: want %d, got %d: %s", i, want, rec.Code, rec.Body.String())
+		}
+	}
+
+	var outboxCount int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM event_outbox
+		   WHERE tenant_id=$1 AND envelope->>'type'='fine.issued'`,
+		env.Tenant).Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if outboxCount != 1 {
+		t.Fatalf("want exactly 1 outbox row (duplicate must roll back), got %d", outboxCount)
+	}
+}

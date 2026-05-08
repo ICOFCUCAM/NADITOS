@@ -58,7 +58,7 @@ func main() {
 	go worker.New(pool, log, router, health, queue, bus).Run(ctx)
 
 	h := api.New(cfg, log, pool, issuer, router, health, queue)
-	if err := server.Run(ctx, log, cfg.Port, h); err != nil {
+	if err := server.Run(ctx, log, "insurance", cfg.Port, h); err != nil {
 		log.Error("server exited", "err", err)
 	}
 }

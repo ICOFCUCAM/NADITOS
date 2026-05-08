@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 
 	"github.com/icofcucam/naditos/packages/go-common/audit"
 	"github.com/icofcucam/naditos/packages/go-common/auth"
@@ -27,10 +28,15 @@ func main() {
 
 	issuer := auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
 	auditCl := audit.New(cfg.AuditURL, "registry")
-	bus := events.NewInProc(log)
+
+	// Outbox-relay pattern: producers write to event_outbox inside their
+	// tx; the relay drains it to the publisher (NATS or InProc).
+	bus := events.OpenPublisher(os.Getenv("NATS_URL"), log)
+	relay := events.NewRelay(pool, log, bus)
+	go relay.Run(ctx)
 
 	h := api.New(cfg, log, pool, issuer, auditCl, bus)
-	if err := server.Run(ctx, log, cfg.Port, h); err != nil {
+	if err := server.Run(ctx, log, "registry", cfg.Port, h); err != nil {
 		log.Error("server exited", "err", err)
 	}
 }

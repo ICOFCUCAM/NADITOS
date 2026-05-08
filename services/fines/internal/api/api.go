@@ -210,11 +210,32 @@ func (a *API) issue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 6. Write the domain event into the outbox INSIDE the same tx. If
+	//    we crash between Commit and a direct bus.Publish, the relay
+	//    picks it up; the producer never has to think about delivery.
+	vehStr := ""
+	if vehicleID != nil {
+		vehStr = vehicleID.String()
+	}
+	env := events.EnvelopeFromContext(r.Context(), "fines", c.TenantID, events.TypeFineIssued, 1,
+		events.FineIssuedPayload{
+			FineID: id.String(), Plate: in.Plate, VehicleID: vehStr,
+			OffenceCode: in.OffenceCode, Amount: amount, Currency: currency,
+			IssuedBy: issuedBy.String(), DeviceID: in.DeviceID,
+			GeoLat: in.GeoLat, GeoLng: in.GeoLng, EvidenceN: len(in.Evidence),
+		})
+	if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+
 	if err := tx.Commit(r.Context()); err != nil {
 		httpx.WriteErr(w, err)
 		return
 	}
 
+	// Audit goes over HTTP and is best-effort; the in-tx outbox above is
+	// the durable record. If audit emit fails, the event still survives.
 	_ = a.audit.Emit(r.Context(), "fine.issue", "fine", id.String(), nil, map[string]any{
 		"plate":        in.Plate,
 		"offence_code": in.OffenceCode,
@@ -223,23 +244,6 @@ func (a *API) issue(w http.ResponseWriter, r *http.Request) {
 		"evidence":     len(in.Evidence),
 		"geo":          [2]float64{in.GeoLat, in.GeoLng},
 	})
-
-	// Publish domain event — downstream services (notifications, analytics,
-	// fraud detection) subscribe without coupling to fines.
-	vehStr := ""
-	if vehicleID != nil {
-		vehStr = vehicleID.String()
-	}
-	env := events.NewEnvelope("fines", c.TenantID, events.TypeFineIssued, 1,
-		events.FineIssuedPayload{
-			FineID: id.String(), Plate: in.Plate, VehicleID: vehStr,
-			OffenceCode: in.OffenceCode, Amount: amount, Currency: currency,
-			IssuedBy: issuedBy.String(), DeviceID: in.DeviceID,
-			GeoLat: in.GeoLat, GeoLng: in.GeoLng, EvidenceN: len(in.Evidence),
-		})
-	env.ActorID = c.Subject
-	env.ActorRole = c.Role
-	_ = a.bus.Publish(r.Context(), env)
 
 	httpx.WriteJSON(w, http.StatusCreated, fineOut{
 		ID: id, Plate: in.Plate, OffenceCode: in.OffenceCode,
@@ -435,6 +439,17 @@ func (a *API) handlePay(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteErr(w, err)
 			return
 		}
+		// Outbox the event in the same tx — successful payment + event
+		// publish are now atomic.
+		env := events.EnvelopeFromContext(r.Context(), "fines", c.TenantID, events.TypeFinePaid, 1,
+			events.FinePaidPayload{
+				FineID: id.String(), Amount: amount, Currency: currency,
+				Method: in.Method, ProviderRef: providerRef,
+			})
+		if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+			httpx.WriteErr(w, err)
+			return
+		}
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		httpx.WriteErr(w, err)
@@ -442,16 +457,7 @@ func (a *API) handlePay(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = a.audit.Emit(r.Context(), "fine.pay", "fine", id.String(), nil,
 		map[string]any{"method": in.Method, "provider_ref": providerRef, "status": status})
-	if status == "succeeded" {
-		env := events.NewEnvelope("fines", c.TenantID, events.TypeFinePaid, 1,
-			events.FinePaidPayload{
-				FineID: id.String(), Amount: amount, Currency: currency,
-				Method: in.Method, ProviderRef: providerRef,
-			})
-		env.ActorID = c.Subject
-		env.ActorRole = c.Role
-		_ = a.bus.Publish(r.Context(), env)
-	}
+
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"intent_id":     intent.ID,
 		"client_secret": intent.ClientSecret,
@@ -499,16 +505,17 @@ func (a *API) dispute(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, err)
 		return
 	}
+	env := events.EnvelopeFromContext(r.Context(), "fines", c.TenantID, events.TypeFineDisputed, 1,
+		events.FineDisputedPayload{FineID: id.String(), FiledBy: c.Subject, Reason: in.Reason})
+	if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		httpx.WriteErr(w, err)
 		return
 	}
 	_ = a.audit.Emit(r.Context(), "fine.dispute", "fine", id.String(), nil, in)
-	env := events.NewEnvelope("fines", c.TenantID, events.TypeFineDisputed, 1,
-		events.FineDisputedPayload{FineID: id.String(), FiledBy: c.Subject, Reason: in.Reason})
-	env.ActorID = c.Subject
-	env.ActorRole = c.Role
-	_ = a.bus.Publish(r.Context(), env)
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -535,18 +542,29 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Release()
-	if _, err := conn.Exec(r.Context(),
+	tx, err := conn.Begin(r.Context())
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err := tx.Exec(r.Context(),
 		`UPDATE fines SET status='cancelled', notes = COALESCE(notes,'') || E'\nCANCELLED: ' || $2
 		   WHERE id=$1`, id, in.Reason); err != nil {
 		httpx.WriteErr(w, err)
 		return
 	}
 	c := auth.ClaimsFrom(r.Context())
-	_ = a.audit.Emit(r.Context(), "fine.cancel", "fine", id.String(), nil, in)
-	env := events.NewEnvelope("fines", c.TenantID, events.TypeFineCancelled, 1,
+	env := events.EnvelopeFromContext(r.Context(), "fines", c.TenantID, events.TypeFineCancelled, 1,
 		events.FineCancelledPayload{FineID: id.String(), Reason: in.Reason})
-	env.ActorID = c.Subject
-	env.ActorRole = c.Role
-	_ = a.bus.Publish(r.Context(), env)
+	if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	_ = a.audit.Emit(r.Context(), "fine.cancel", "fine", id.String(), nil, in)
 	w.WriteHeader(http.StatusNoContent)
 }

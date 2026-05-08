@@ -48,7 +48,7 @@ func main() {
 	}
 	if *mode == "api" || *mode == "both" {
 		h := api.New(cfg, log, pool, issuer)
-		if err := server.Run(ctx, log, cfg.Port, h); err != nil {
+		if err := server.Run(ctx, log, "anpr-gateway", cfg.Port, h); err != nil {
 			log.Error("server exited", "err", err)
 		}
 	} else {

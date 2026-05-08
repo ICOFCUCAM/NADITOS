@@ -40,7 +40,7 @@ func main() {
 	issuer := auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
 
 	h := proxy.New(log, issuer, proxy.RoutesFromEnv())
-	if err := server.Run(context.Background(), log, cfg.Port, h); err != nil {
+	if err := server.Run(context.Background(), log, "gateway", cfg.Port, h); err != nil {
 		log.Error("gateway exited", "err", err)
 	}
 

@@ -36,7 +36,7 @@ func main() {
 		)
 		httpx.WriteJSON(w, 202, map[string]string{"status": "queued"})
 	})
-	if err := server.Run(context.Background(), log, cfg.Port, mux); err != nil {
+	if err := server.Run(context.Background(), log, "notifications", cfg.Port, mux); err != nil {
 		log.Error("server exited", "err", err)
 	}
 }

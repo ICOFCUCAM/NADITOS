@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 
 	"github.com/icofcucam/naditos/packages/go-common/audit"
 	"github.com/icofcucam/naditos/packages/go-common/auth"
@@ -28,15 +29,41 @@ func main() {
 
 	issuer := auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
 	auditCl := audit.New(cfg.AuditURL, "license")
-	bus := events.NewInProc(log)
 
-	// Wire the demerit engine to listen for fine.issued and update driver
-	// standing. Local subscriptions in Phase-1; in production with NATS
-	// this becomes a JetStream durable consumer on the same subject.
-	demerit.New(pool, log, auditCl, bus).Wire(bus)
+	// Demerit subscribes to the local InProc bus regardless of whether
+	// the canonical bus is NATS — the relay forwards to both. Wiring is
+	// the same in dev and prod.
+	localBus := events.NewInProc(log)
+	demerit.New(pool, log, auditCl, localBus).Wire(localBus)
 
-	h := api.New(cfg, log, pool, issuer, auditCl, bus)
-	if err := server.Run(ctx, log, cfg.Port, h); err != nil {
+	// In dev we publish straight to localBus. In prod with NATS, the
+	// outbox relay forwards every event to NATS; a separate JetStream
+	// consumer in this process re-injects the events into localBus so
+	// demerit fires identically.
+	bus := events.OpenPublisher(os.Getenv("NATS_URL"), log)
+	relay := events.NewRelay(pool, log, fanOut{primary: bus, local: localBus})
+	go relay.Run(ctx)
+
+	h := api.New(cfg, log, pool, issuer, auditCl, localBus)
+	if err := server.Run(ctx, log, "license", cfg.Port, h); err != nil {
 		log.Error("server exited", "err", err)
 	}
+}
+
+// fanOut is a Publisher that forwards every event to a primary
+// transport (NATS in prod, in-process in dev) AND to a local InProc
+// bus. Subscribers in this process — like the demerit engine — only
+// know about localBus.
+type fanOut struct {
+	primary events.Publisher
+	local   events.Publisher
+}
+
+func (f fanOut) Publish(ctx context.Context, env events.Envelope) error {
+	_ = f.local.Publish(ctx, env)
+	return f.primary.Publish(ctx, env)
+}
+func (f fanOut) Close() error {
+	_ = f.local.Close()
+	return f.primary.Close()
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 
 	"github.com/icofcucam/naditos/packages/go-common/audit"
 	"github.com/icofcucam/naditos/packages/go-common/auth"
@@ -29,12 +30,18 @@ func main() {
 	issuer := auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
 	auditCl := audit.New(cfg.AuditURL, "fines")
 
-	// Wire Phase-1 default adapters; Phase-2 swaps these to real providers.
+	// Phase-1 default adapters; Phase-2 swaps these to real providers.
 	pay := payments.NewDevStub()
-	bus := events.NewInProc(log)
+
+	// OpenPublisher picks NATS when NATS_URL is set, otherwise an
+	// in-process bus. Producers write to the outbox inside their tx;
+	// the relay drains the outbox into this publisher.
+	bus := events.OpenPublisher(os.Getenv("NATS_URL"), log)
+	relay := events.NewRelay(pool, log, bus)
+	go relay.Run(ctx)
 
 	h := api.New(cfg, log, pool, issuer, auditCl, pay, bus)
-	if err := server.Run(ctx, log, cfg.Port, h); err != nil {
+	if err := server.Run(ctx, log, "fines", cfg.Port, h); err != nil {
 		log.Error("server exited", "err", err)
 	}
 }

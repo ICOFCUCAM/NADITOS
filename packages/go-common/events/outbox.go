@@ -6,31 +6,44 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// OutboxPublisher persists events to the event_outbox table inside the
-// caller's transaction; a relay drains the table and forwards to the
-// real bus. This is the gold-standard pattern for atomic
-// "state-change-and-event" updates across services.
+// WriteOutbox persists an envelope into event_outbox inside the caller's
+// transaction. The relay running elsewhere in the process drains the
+// table and forwards to the real bus; producers therefore enjoy at-
+// least-once delivery atomic with their domain write.
 //
-//   tx := db.Begin(...)
-//   // ... domain mutations on the same tx ...
-//   outbox.Publish(ctx, tx, env)
-//   tx.Commit()
+// Usage:
 //
-// A relay loop reads pending rows and replays them, marking delivered.
-type OutboxPublisher struct {
-	pool *pgxpool.Pool
+//	tx, _ := conn.Begin(ctx)
+//	defer tx.Rollback(ctx)
+//	// ... INSERTs / UPDATEs ...
+//	if err := events.WriteOutbox(ctx, tx, env); err != nil { ... }
+//	if err := tx.Commit(ctx); err != nil { ... }
+//
+// If the outbox INSERT fails the caller can roll back the whole change
+// set; if it succeeds and Commit succeeds the event is durable. If the
+// service crashes after Commit but before publish, the relay picks the
+// row up on next tick.
+func WriteOutbox(ctx context.Context, tx pgx.Tx, env Envelope) error {
+	body, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx,
+		`INSERT INTO event_outbox (tenant_id, envelope) VALUES ($1, $2)`,
+		env.TenantID, body)
+	return err
 }
 
-func NewOutbox(pool *pgxpool.Pool) *OutboxPublisher {
-	return &OutboxPublisher{pool: pool}
-}
+// OutboxPublisher / NewOutbox / PublishTx are kept for callers that
+// can't import pgx; the closure form is equivalent to WriteOutbox.
+type OutboxPublisher struct{ pool *pgxpool.Pool }
 
-// PublishTx writes one envelope inside an existing transaction. Pass a
-// closure that runs the INSERT against your tx — this avoids any direct
-// pgx type leak in the events package while keeping the call atomic.
+func NewOutbox(pool *pgxpool.Pool) *OutboxPublisher { return &OutboxPublisher{pool: pool} }
+
 func (o *OutboxPublisher) PublishTx(ctx context.Context, env Envelope,
 	exec func(ctx context.Context, sql string, args ...any) error) error {
 	body, err := json.Marshal(env)

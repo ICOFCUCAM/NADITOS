@@ -1,5 +1,6 @@
-// Package server boots a standard HTTP server with health probes and
-// graceful shutdown. Used by every Go service.
+// Package server boots a standard HTTP server with health probes,
+// observability middleware, metrics, and graceful shutdown. Used by
+// every Go service via server.Run(ctx, log, name, port, handler).
 package server
 
 import (
@@ -12,6 +13,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/icofcucam/naditos/packages/go-common/observability"
 )
 
 func Health() http.Handler {
@@ -27,30 +30,28 @@ func Health() http.Handler {
 	return mux
 }
 
-// Mount layers the health and metrics endpoints onto an existing handler.
-func Mount(h http.Handler) http.Handler {
+// Mount layers /healthz, /livez, /metrics, and the observability
+// middleware onto a service handler. The middleware:
+//   - injects X-Request-Id and a trace id into the context
+//   - emits a structured access log per request
+//   - increments the in-process Prometheus counters served at /metrics
+func Mount(log *slog.Logger, service string, h http.Handler) http.Handler {
+	wrapped := observability.Middleware(log, service)(h)
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", Health())
 	mux.Handle("/livez", Health())
-	mux.Handle("/metrics", metricsHandler())
-	mux.Handle("/", h)
+	mux.Handle("/metrics", observability.MetricsHandler())
+	mux.Handle("/", wrapped)
 	return mux
 }
 
-// metricsHandler is wired here so the server package doesn't have to
-// import observability (which imports net/http already). Services that
-// want richer metrics replace this with observability.MetricsHandler().
-func metricsHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = w.Write([]byte("# NADITOS metrics — see observability.MetricsHandler for full export\n"))
-	})
-}
-
-func Run(ctx context.Context, log *slog.Logger, port int, h http.Handler) error {
+// Run starts the service on the given port. service is used in access
+// logs and metric labels; it should match the service name (auth,
+// registry, fines, ...).
+func Run(ctx context.Context, log *slog.Logger, service string, port int, h http.Handler) error {
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
-		Handler:           Mount(h),
+		Handler:           Mount(log, service, h),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
