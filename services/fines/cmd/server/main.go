@@ -9,12 +9,14 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/config"
 	"github.com/icofcucam/naditos/packages/go-common/connectors"
 	"github.com/icofcucam/naditos/packages/go-common/contracts/payments"
+	"github.com/icofcucam/naditos/packages/go-common/contracts/storage"
 	"github.com/icofcucam/naditos/packages/go-common/db"
 	"github.com/icofcucam/naditos/packages/go-common/events"
 	"github.com/icofcucam/naditos/packages/go-common/logger"
 	"github.com/icofcucam/naditos/packages/go-common/server"
 	"github.com/icofcucam/naditos/services/fines/internal/api"
 	"github.com/icofcucam/naditos/services/fines/internal/escalation"
+	"github.com/icofcucam/naditos/services/fines/internal/reaper"
 )
 
 func main() {
@@ -47,6 +49,11 @@ func main() {
 	// regulation_escalation stages (warning → penalty → flag → seize →
 	// court). Sweep every 5 minutes by default.
 	go escalation.New(pool, log).Run(ctx)
+
+	// Background reaper: seals fine_evidence past its retention
+	// deadline and deletes the underlying object. Phase-2 default
+	// bucket is "evidence"; Phase-4 will pull this from config.
+	go reaper.New(pool, storage.NewDevStub(), "evidence", log).Run(ctx)
 
 	// The runtime DB user is BYPASSRLS, so the same pool serves both
 	// regular and admin uses. Tests pass a distinct admin pool.
