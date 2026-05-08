@@ -72,6 +72,7 @@ start registry      8002 services/registry
 start license       8003 services/license
 start fines         8006 services/fines
 start anpr-gateway  8008 services/anpr-gateway
+start notifications 8009 services/notifications
 
 wait_health() {
   local port=$1 name=$2
@@ -94,6 +95,7 @@ wait_health 8006 fines
 wait_health 8007 audit
 wait_health 8003 license
 wait_health 8008 anpr-gateway
+wait_health 8009 notifications
 
 H_TENANT=(-H "X-Tenant-Id: $TENANT")
 H_JSON=(-H "Content-Type: application/json")
@@ -134,6 +136,19 @@ VEH=$(curl -sS -X POST http://localhost:8002/v1/vehicles "${H_TENANT[@]}" "${H_J
 VID=$(echo "$VEH" | jq -r .id)
 [ -n "$VID" ] && [ "$VID" != null ] || { echo "✗ vehicle create failed: $VEH"; exit 1; }
 echo "  ✓ vehicle $PLATE / $VID"
+
+# Link the citizen to the vehicle as owner so notifications can resolve
+# a recipient. Owners admin API is Phase-3+ — for smoke we set up via SQL.
+CITIZEN_ID=$(echo "$CITIZEN" | jq -r .user.id)
+PGPASSWORD=naditos psql -h localhost -U naditos -d naditos >/dev/null 2>&1 <<SQL
+WITH new_owner AS (
+  INSERT INTO owners (tenant_id, user_id, full_name, email)
+  VALUES ('$TENANT', '$CITIZEN_ID', 'Demo citizen', 'citizen@demo')
+  RETURNING id
+)
+UPDATE vehicles SET owner_id = (SELECT id FROM new_owner) WHERE id = '$VID';
+SQL
+echo "  ✓ vehicle linked to citizen owner"
 
 # ─── 5. ANPR enqueue + poll ─────────────────────────────────────────────
 echo "→ officer scans plate"
@@ -220,6 +235,28 @@ F=$(curl -sS http://localhost:8006/v1/fines/"$FID" "${H_TENANT[@]}" \
 S=$(echo "$F" | jq -r .fine.status)
 [ "$S" = paid ] || { echo "✗ fine status not paid: $S"; exit 1; }
 echo "  ✓ fine status=paid"
+
+# ─── 11. notifications consumer drained the events ─────────────────────
+# naditos has BYPASSRLS so we don't need SET row_security=off here.
+echo "→ wait for notifications consumer to drain"
+NOTIF_COUNT=0
+for i in $(seq 1 30); do
+  NOTIF_COUNT=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+    "SELECT COUNT(*) FROM notification_records
+       WHERE tenant_id='$TENANT' AND status='sent';" 2>/dev/null | tr -d ' ')
+  if [ "${NOTIF_COUNT:-0}" -ge 2 ]; then
+    break
+  fi
+  sleep 0.5
+done
+[ "${NOTIF_COUNT:-0}" -ge 2 ] || {
+  echo "✗ expected ≥2 notifications (fine.issued + fine.paid), got $NOTIF_COUNT"
+  PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -c \
+    "SELECT status, channel, recipient, template
+       FROM notification_records WHERE tenant_id='$TENANT';" 2>&1 | head -20
+  exit 1
+}
+echo "  ✓ $NOTIF_COUNT notifications delivered (fine.issued + fine.paid)"
 
 echo
 echo "✅ smoke run complete — all stages green"
