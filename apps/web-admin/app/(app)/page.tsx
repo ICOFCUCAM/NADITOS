@@ -9,6 +9,7 @@ type Counts = {
   vehicles_black: number;
   fines_unpaid: number;
   fines_today: number;
+  alerts_open: number;
 };
 
 export default function Dashboard() {
@@ -22,9 +23,11 @@ export default function Dashboard() {
     Promise.all([
       services.registry("/v1/vehicles", { token: session.accessToken, tenant: session.user.tenant }),
       services.fines("/v1/fines", { token: session.accessToken, tenant: session.user.tenant }),
-    ]).then(([v, f]: any) => {
+      services.audit("/v1/audit/alerts", { token: session.accessToken, tenant: session.user.tenant }),
+    ]).then(([v, f, a]: any) => {
       const items = v?.items ?? [];
       const fines = f?.items ?? [];
+      const alerts = a?.items ?? [];
       const today = new Date().toISOString().slice(0, 10);
       setCounts({
         vehicles_total: items.length,
@@ -32,6 +35,7 @@ export default function Dashboard() {
         vehicles_black: items.filter((x: any) => x.status === "black").length,
         fines_unpaid:   fines.filter((x: any) => x.status !== "paid" && x.status !== "cancelled").length,
         fines_today:    fines.filter((x: any) => x.issued_at?.startsWith(today)).length,
+        alerts_open:    alerts.length,
       });
     }).catch(() => setCounts(null));
   }, [session]);
@@ -51,15 +55,24 @@ export default function Dashboard() {
         <Stat label="Stolen / seized (black)" value={counts?.vehicles_black ?? "—"} tone="black" />
         <Stat label="Outstanding fines"   value={counts?.fines_unpaid   ?? "—"} tone="amber" />
         <Stat label="Fines issued today"  value={counts?.fines_today    ?? "—"} />
+        <a href="/audit"><Card className="hover:shadow-md transition cursor-pointer">
+          <div className="text-sm text-slate-600">Open audit alerts</div>
+          <div className={`mt-2 text-3xl font-bold ${counts && counts.alerts_open > 0 ? "text-red-700" : "text-slate-900"}`}>
+            {counts?.alerts_open ?? "—"}
+          </div>
+          <div className="mt-1 text-xs text-slate-500">Click to triage</div>
+        </Card></a>
         <Card>
           <div className="text-sm text-slate-600">Modules enabled</div>
           <div className="mt-2 flex flex-wrap gap-2">
             <Pill tone="green">Registry</Pill>
             <Pill tone="green">Fines</Pill>
             <Pill tone="green">Audit</Pill>
-            <Pill>Insurance (Phase-2)</Pill>
-            <Pill>Inspection (Phase-2)</Pill>
-            <Pill>ANPR (Phase-2)</Pill>
+            <Pill tone="green">License</Pill>
+            <Pill tone="green">Insurance</Pill>
+            <Pill tone="green">Inspection</Pill>
+            <Pill tone="green">ANPR</Pill>
+            <Pill tone="green">Notifications</Pill>
           </div>
         </Card>
       </div>
