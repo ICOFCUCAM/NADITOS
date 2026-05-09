@@ -176,6 +176,61 @@ func TestMyVehicles_ResponseShape(t *testing.T) {
 	_ = citizenID // used implicitly via env.Token's user-row insert
 }
 
+// TestMyVehicles_StripsIsWanted: is_wanted is an operational marker
+// (active warrant, ANPR alert pipeline). The registered owner must
+// not see it via the citizen endpoint, even when set in the
+// database — surfacing it would defeat its purpose.
+func TestMyVehicles_StripsIsWanted(t *testing.T) {
+	env := testkit.Setup(t)
+	grantOwnersSelf(t, env)
+	tok, _ := env.Token("citizen", "owners:self")
+	h := build(env)
+
+	// Claim owner.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/citizens/me/owner",
+		`{"full_name":"Wanted Owner","email":"w@example.com"}`, tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("claim: %d %s", rec.Code, rec.Body.String())
+	}
+	var claimed struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &claimed)
+
+	// Vehicle linked to owner WITH is_wanted=true and is_stolen=true.
+	// The stolen flag should still come through (the citizen reported
+	// it). Only is_wanted is sanitised.
+	plate := "MW-" + uuid.NewString()[:6]
+	env.Exec(`INSERT INTO vehicles
+	            (tenant_id, plate, owner_id, is_wanted, is_stolen)
+	          VALUES ($1, $2, $3::uuid, true, true)`,
+		env.Tenant, plate, claimed.ID)
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/citizens/me/vehicles", "", tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Items []struct {
+			Plate    string `json:"plate"`
+			IsWanted bool   `json:"is_wanted"`
+			IsStolen bool   `json:"is_stolen"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items: want 1, got %d", len(resp.Items))
+	}
+	if resp.Items[0].IsWanted {
+		t.Error("is_wanted leaked to the registered owner")
+	}
+	if !resp.Items[0].IsStolen {
+		t.Error("is_stolen should still surface to the owner")
+	}
+}
+
 // TestOwners_GetMyOwner_RoundTrip: claim → GET returns the same row.
 // Drives the citizen profile UI's pre-populate path. Pre-claim, GET
 // must 404 so the UI can render an empty form instead of waiting on

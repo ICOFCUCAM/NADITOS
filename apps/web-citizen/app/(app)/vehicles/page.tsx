@@ -17,6 +17,7 @@ type Vehicle = {
   insurance_expires_at?: string | null;
   inspection_expires_at?: string | null;
   is_stolen: boolean;
+  is_seized: boolean;
 };
 
 export default function MyVehiclesPage() {
@@ -103,7 +104,12 @@ export default function MyVehiclesPage() {
               <div>Insurance: {expiryBadge(v.insurance_expires_at)}</div>
               <div>Inspection: {expiryBadge(v.inspection_expires_at)}</div>
             </div>
-            {v.is_stolen && <Pill tone="black">stolen</Pill>}
+            {(v.is_stolen || v.is_seized) && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {v.is_stolen && <Pill tone="black">reported stolen</Pill>}
+                {v.is_seized && <Pill tone="red">seized</Pill>}
+              </div>
+            )}
 
             {/* Transfer surface. issuedCodes[v.id] takes precedence so a
                 seller who just generated a code sees it instead of the
@@ -161,10 +167,6 @@ export default function MyVehiclesPage() {
       </div>
     </>
   );
-}
-
-function date(s?: string | null) {
-  return s ? new Date(s).toISOString().slice(0, 10) : "—";
 }
 
 // expiryBadge renders an expiry timestamp with urgency colour. The

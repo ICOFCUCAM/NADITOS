@@ -260,6 +260,12 @@ func (a *API) getMyOwner(w http.ResponseWriter, r *http.Request) {
 }
 
 // myVehicles lists the vehicles owned by the citizen behind the JWT.
+//
+// is_wanted is intentionally stripped from the response: it's an
+// operational marker (active warrant, ANPR alert pipeline) and
+// surfacing it to the registered owner would defeat its purpose.
+// is_stolen and is_seized stay because the citizen already knows
+// (they reported the theft / their vehicle was physically seized).
 func (a *API) myVehicles(w http.ResponseWriter, r *http.Request) {
 	c := auth.ClaimsFrom(r.Context())
 	conn, err := db.WithTenant(r.Context(), a.pool)
@@ -278,6 +284,7 @@ func (a *API) myVehicles(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		v, err := scanVehicle(rows)
 		if err != nil { httpx.WriteErr(w, err); return }
+		v.IsWanted = false // never expose to the registered owner
 		out = append(out, v)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
