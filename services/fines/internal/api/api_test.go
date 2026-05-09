@@ -39,6 +39,7 @@ func buildWithPay(env *testkit.Env, pay payments.Provider) http.Handler {
 		pay,
 		connectors.NewHealthMonitor(env.AdminPool()),
 		events.NewInProc(discardLogger()),
+		nil, // no reaper in unit tests; exercised in reaper package + smoke
 	)
 }
 

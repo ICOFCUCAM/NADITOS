@@ -53,11 +53,12 @@ func main() {
 	// Background reaper: seals fine_evidence past its retention
 	// deadline and deletes the underlying object. Phase-2 default
 	// bucket is "evidence"; Phase-4 will pull this from config.
-	go reaper.New(pool, storage.NewDevStub(), "evidence", log).Run(ctx)
+	reap := reaper.New(pool, storage.NewDevStub(), "evidence", log)
+	go reap.Run(ctx)
 
 	// The runtime DB user is BYPASSRLS, so the same pool serves both
 	// regular and admin uses. Tests pass a distinct admin pool.
-	h := api.New(cfg, log, pool, pool, issuer, auditCl, pay, hm, bus)
+	h := api.New(cfg, log, pool, pool, issuer, auditCl, pay, hm, bus, reap)
 	if err := server.Run(ctx, log, "fines", cfg.Port, h); err != nil {
 		log.Error("server exited", "err", err)
 	}

@@ -372,7 +372,47 @@ done
 }
 echo "  ✓ license.reinstated delivered"
 
-# ─── 13. final audit chain integrity ───────────────────────────────────
+# ─── 13. evidence retention reaper ─────────────────────────────────────
+# Backdate the smoke fine + force a 1-day retention policy, then trigger
+# the reaper and confirm the evidence row is sealed and the underlying
+# storage object is gone. Hardens the path that protects citizens'
+# right-to-be-forgotten timeline against a configuration drift bug.
+echo "→ reaper: force-expire the smoke fine evidence"
+PGPASSWORD=naditos psql -h localhost -U naditos -d naditos >/dev/null 2>&1 -c "
+INSERT INTO evidence_retention_policy
+       (tenant_id, default_days, paid_fine_days, cancelled_fine_days)
+VALUES ('$TENANT', 1, 1, 1)
+ON CONFLICT (tenant_id) DO UPDATE
+   SET default_days=1, paid_fine_days=1, cancelled_fine_days=1,
+       legal_hold_active=false;
+-- Backdate every fine and its evidence so the reaper sees them as
+-- past-deadline regardless of status branch (paid / cancelled /
+-- default). Keep paid_at consistent for paid fines so the paid_fine_days
+-- branch fires correctly.
+UPDATE fines SET issued_at = now() - interval '60 days',
+                 due_at    = now() - interval '46 days',
+                 paid_at   = CASE WHEN paid_at IS NOT NULL
+                                  THEN now() - interval '30 days'
+                                  ELSE NULL END
+ WHERE tenant_id='$TENANT';
+UPDATE fine_evidence SET created_at = now() - interval '60 days'
+ WHERE tenant_id='$TENANT';"
+
+REAP_RC=$(curl -sS -o /tmp/smoke.body -w '%{http_code}' \
+            -X POST "http://localhost:8006/v1/fines/admin/reaper:run" \
+            "${H_TENANT[@]}" -H "Authorization: Bearer $ADMIN_TOKEN")
+[ "$REAP_RC" = 200 ] || { echo "✗ reaper trigger: $REAP_RC: $(cat /tmp/smoke.body)"; exit 1; }
+SEALED=$(jq -r .sealed </tmp/smoke.body)
+[ "${SEALED:-0}" -ge 1 ] || { echo "✗ reaper: expected ≥1 sealed, got: $(cat /tmp/smoke.body)"; exit 1; }
+echo "  ✓ reaper sealed $SEALED row(s)"
+
+LIVE=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+         "SELECT count(*) FROM fine_evidence
+           WHERE tenant_id='$TENANT' AND sealed_at IS NULL;" | tr -d ' ')
+[ "$LIVE" = "0" ] || { echo "✗ unsealed evidence remains: $LIVE"; exit 1; }
+echo "  ✓ no unsealed evidence remains for tenant $TENANT"
+
+# ─── 14. final audit chain integrity ───────────────────────────────────
 # Re-verify the audit chain AFTER the demerit loop so any tamper in
 # rows added between stages 8 and 12 is caught. The chain length here
 # proves the suspension and reinstatement events were also stamped.

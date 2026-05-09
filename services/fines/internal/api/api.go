@@ -10,6 +10,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -30,6 +31,14 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
 )
 
+// Reaper is the small subset of reaper.Job the api package depends
+// on — kept as an interface so the api package doesn't pull the full
+// reaper surface (and its storage import) into tests that don't need
+// it. Tests can pass nil to disable the trigger endpoint.
+type Reaper interface {
+	RunOnce(ctx context.Context) (int, error)
+}
+
 type API struct {
 	cfg       config.Service
 	log       *slog.Logger
@@ -40,6 +49,7 @@ type API struct {
 	pay       payments.Provider
 	hm        *connectors.HealthMonitor
 	bus       events.Publisher
+	reap      Reaper
 }
 
 // New wires the fines API.
@@ -52,9 +62,10 @@ type API struct {
 // BYPASSRLS pool.
 func New(cfg config.Service, log *slog.Logger, pool, adminPool *pgxpool.Pool,
 	issuer *auth.Issuer, audit *audit.Client,
-	pay payments.Provider, hm *connectors.HealthMonitor, bus events.Publisher) http.Handler {
+	pay payments.Provider, hm *connectors.HealthMonitor, bus events.Publisher,
+	reap Reaper) http.Handler {
 	a := &API{cfg: cfg, log: log, pool: pool, adminPool: adminPool,
-		issuer: issuer, audit: audit, pay: pay, hm: hm, bus: bus}
+		issuer: issuer, audit: audit, pay: pay, hm: hm, bus: bus, reap: reap}
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:create")(http.HandlerFunc(a.issue))))
 	mux.Handle("GET  /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:read")(http.HandlerFunc(a.list))))
@@ -65,6 +76,14 @@ func New(cfg config.Service, log *slog.Logger, pool, adminPool *pgxpool.Pool,
 	mux.Handle("POST /v1/fines/{id}/cancel",  issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.cancel))))
 	mux.Handle("GET  /v1/fines/payments/health",
 		issuer.Middleware(http.HandlerFunc(a.paymentsHealth)))
+	// Admin-only synchronous reaper trigger. The background sweep runs
+	// every 6h; ops staff need a way to force a sweep without restarting
+	// the service (e.g. after backfilling a tenant's retention policy).
+	// Reuses the existing fines:cancel permission — admins have it,
+	// nobody else does. Reaping evidence is in the same destructive-
+	// admin tier.
+	mux.Handle("POST /v1/fines/admin/reaper:run",
+		issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.runReaper))))
 	// Provider webhooks are unauthenticated by client JWT — the proof is
 	// the signature on the body. RequirePermission would deny them
 	// outright, so this route deliberately bypasses issuer.Middleware.
@@ -844,6 +863,23 @@ func (a *API) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		map[string]any{"intent": evt.IntentID, "provider": info.Provider})
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// runReaper drives one synchronous reaper sweep. Returns the count of
+// rows sealed so ops can verify the trigger had work to do. 503 when
+// the service was started without a reaper (tests do this).
+func (a *API) runReaper(w http.ResponseWriter, r *http.Request) {
+	if a.reap == nil {
+		httpx.WriteErr(w, httpx.Err(http.StatusServiceUnavailable,
+			"no_reaper", "reaper not wired"))
+		return
+	}
+	n, err := a.reap.RunOnce(r.Context())
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"sealed": n})
 }
 
 // paymentsHealth surfaces the per-tenant fail-streak for the bound
