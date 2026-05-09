@@ -26,6 +26,12 @@ export default function CitizenHome() {
             View, dispute, or pay outstanding fines.
           </div>
         </Card></Link>
+        <Link href="/license"><Card className="hover:shadow-md transition">
+          <div className="text-lg font-semibold">My driver license</div>
+          <div className="text-sm text-slate-600">
+            License standing, demerit points, and suspension history.
+          </div>
+        </Card></Link>
         <Link href="/transfers"><Card className="hover:shadow-md transition">
           <div className="text-lg font-semibold">Ownership transfers</div>
           <div className="text-sm text-slate-600">

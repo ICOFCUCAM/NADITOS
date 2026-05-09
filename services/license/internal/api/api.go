@@ -77,6 +77,11 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 		issuer.Middleware(http.HandlerFunc(a.verify)))
 	mux.Handle("POST /v1/licenses/{id}/issue-token",
 		issuer.Middleware(http.HandlerFunc(a.issueVerifyToken)))
+	// Citizen self-service. The handler keys off the JWT subject so a
+	// citizen cannot read another driver's license without a separate
+	// permission check — RLS plus the user_id filter gates it.
+	mux.Handle("GET  /v1/citizens/me/license",
+		issuer.Middleware(http.HandlerFunc(a.myLicense)))
 
 	return mux
 }
