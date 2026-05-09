@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Card, Input, Pill, services, useSession, statusBadgeClasses, statusLabel, type VehicleStatus } from "@naditos/web-common";
 
@@ -44,8 +45,10 @@ export default function VehiclesPage() {
           </thead>
           <tbody>
             {items.map((v) => (
-              <tr key={v.id} className="border-t border-slate-100">
-                <td className="p-3 font-mono">{v.plate}</td>
+              <tr key={v.id} className="border-t border-slate-100 hover:bg-slate-50">
+                <td className="p-3 font-mono">
+                  <Link href={`/vehicles/${v.id}`} className="hover:underline">{v.plate}</Link>
+                </td>
                 <td className="p-3">{[v.make, v.model, v.year].filter(Boolean).join(" ")}</td>
                 <td className="p-3">
                   <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs ring-1 ${statusBadgeClasses(v.status)}`}>
