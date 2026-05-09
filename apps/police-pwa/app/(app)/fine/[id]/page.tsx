@@ -28,7 +28,7 @@ type Custody = {
   occurred_at: string;
 };
 
-type Fine = {
+type FineFields = {
   id: string;
   plate: string;
   offence_code: string;
@@ -38,6 +38,10 @@ type Fine = {
   issued_at: string;
   due_at: string;
   escalation_stage: number;
+};
+
+type FineDetail = {
+  fine: FineFields;
   evidence?: Evidence[];
   custody?: Custody[];
 };
@@ -45,7 +49,7 @@ type Fine = {
 export default function FineDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { session } = useSession();
-  const [fine, setFine] = useState<Fine | null>(null);
+  const [data, setData] = useState<FineDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -53,12 +57,15 @@ export default function FineDetailPage() {
     services.fines(`/v1/fines/${id}`, {
       token: session.accessToken, tenant: session.user.tenant,
     })
-      .then((r: any) => setFine(r as Fine))
+      .then((r: any) => setData(r as FineDetail))
       .catch((e: any) => setErr(e?.message ?? "Failed to load"));
   }, [session, id]);
 
   if (err) return <div className="p-4 text-red-400 text-sm">Couldn't load: {err}</div>;
-  if (!fine) return <div className="p-4 text-slate-400 text-sm">Loading…</div>;
+  if (!data) return <div className="p-4 text-slate-400 text-sm">Loading…</div>;
+  const fine = data.fine;
+  const evidence = data.evidence ?? [];
+  const custody = data.custody ?? [];
 
   return (
     <div className="p-4 space-y-3">
@@ -87,10 +94,10 @@ export default function FineDetailPage() {
         )}
       </div>
 
-      {(fine.evidence ?? []).length > 0 && (
+      {evidence.length > 0 && (
         <>
           <h2 className="text-xs uppercase tracking-wide text-slate-400 mt-3">Evidence</h2>
-          {(fine.evidence ?? []).map((e) => (
+          {evidence.map((e) => (
             <div key={e.sha256} className="rounded bg-slate-800 p-2 text-xs space-y-1">
               <div className="font-medium">{e.kind}</div>
               <div className="text-slate-400">
@@ -105,10 +112,10 @@ export default function FineDetailPage() {
         </>
       )}
 
-      {(fine.custody ?? []).length > 0 && (
+      {custody.length > 0 && (
         <>
           <h2 className="text-xs uppercase tracking-wide text-slate-400 mt-3">Chain of custody</h2>
-          {(fine.custody ?? []).map((c, i) => (
+          {custody.map((c, i) => (
             <div key={i} className="rounded bg-slate-800 p-2 text-xs">
               <div>
                 <span className="font-medium">{c.action}</span>{" "}

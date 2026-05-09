@@ -792,6 +792,58 @@ func TestListIssuedByMe_OnlyMyIssuance(t *testing.T) {
 	}
 }
 
+// TestGet_ResponseShape: pins the GET /v1/fines/{id} envelope shape
+// the three frontend detail pages rely on:
+//   { fine: {...}, evidence: [...], custody: [...] }
+// Without this test a backend refactor that flattens the response
+// silently breaks every detail page.
+func TestGet_ResponseShape(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	officerTok, _ := env.Token("officer", "fines:create")
+	adminTok, _ := env.Token("admin", "fines:read")
+
+	h := build(env)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("issue: %d %s", rec.Code, rec.Body.String())
+	}
+	var issued struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/fines/"+issued.ID, "", adminTok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Fine     map[string]any   `json:"fine"`
+		Evidence []map[string]any `json:"evidence"`
+		Custody  []map[string]any `json:"custody"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Fine == nil {
+		t.Fatalf("response missing fine envelope: %s", rec.Body.String())
+	}
+	if resp.Fine["plate"] != plate {
+		t.Fatalf("fine.plate: want %s, got %v", plate, resp.Fine["plate"])
+	}
+	if resp.Evidence == nil {
+		t.Fatalf("response missing evidence envelope: %s", rec.Body.String())
+	}
+	if len(resp.Evidence) != 1 {
+		t.Fatalf("want 1 evidence row, got %d", len(resp.Evidence))
+	}
+	// Custody is captured during issue (one row per evidence item).
+	if resp.Custody == nil || len(resp.Custody) == 0 {
+		t.Fatalf("response missing custody chain: %s", rec.Body.String())
+	}
+}
+
 // TestResolveDispute_Accepted_CancelsFine: admin accepts a citizen
 // dispute — the fine flips to cancelled, the dispute row records the
 // outcome+note+resolved_at, and a fine.cancelled outbox event lands

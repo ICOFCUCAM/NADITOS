@@ -33,7 +33,7 @@ type Custody = {
   occurred_at: string;
 };
 
-type Fine = {
+type FineFields = {
   id: string;
   plate: string;
   offence_code: string;
@@ -43,6 +43,13 @@ type Fine = {
   issued_at: string;
   due_at: string;
   escalation_stage: number;
+};
+
+// Backend returns the fine object nested under "fine" with parallel
+// evidence and custody arrays — see services/fines/internal/api/api.go's
+// get handler.
+type FineDetail = {
+  fine: FineFields;
   evidence?: Evidence[];
   custody?: Custody[];
 };
@@ -58,7 +65,7 @@ const STAGE_LABEL: Record<number, string> = {
 export default function FineDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { session } = useSession();
-  const [fine, setFine] = useState<Fine | null>(null);
+  const [data, setData] = useState<FineDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -66,12 +73,15 @@ export default function FineDetailPage() {
     services.fines(`/v1/fines/${id}`, {
       token: session.accessToken, tenant: session.user.tenant,
     })
-      .then((r: any) => setFine(r as Fine))
+      .then((r: any) => setData(r as FineDetail))
       .catch((e: any) => setErr(e?.message ?? "Failed to load"));
   }, [session, id]);
 
   if (err) return <Card className="text-red-700">Couldn't load: {err}</Card>;
-  if (!fine) return <Card>Loading…</Card>;
+  if (!data) return <Card>Loading…</Card>;
+  const fine = data.fine;
+  const evidence = data.evidence ?? [];
+  const custody = data.custody ?? [];
 
   return (
     <>
@@ -107,10 +117,10 @@ export default function FineDetailPage() {
       <h2 className="text-sm uppercase tracking-wide text-slate-500 mt-2">
         Evidence
       </h2>
-      {(fine.evidence ?? []).length === 0 && (
+      {evidence.length === 0 && (
         <Card className="text-sm text-slate-500">No evidence on file.</Card>
       )}
-      {(fine.evidence ?? []).map((e) => (
+      {evidence.map((e) => (
         <Card key={e.sha256}>
           <div className="space-y-1 text-sm">
             <div className="font-medium">{e.kind}</div>
@@ -131,10 +141,10 @@ export default function FineDetailPage() {
       <h2 className="text-sm uppercase tracking-wide text-slate-500 mt-2">
         Chain of custody
       </h2>
-      {(fine.custody ?? []).length === 0 && (
+      {custody.length === 0 && (
         <Card className="text-sm text-slate-500">No custody events.</Card>
       )}
-      {(fine.custody ?? []).map((c, i) => (
+      {custody.map((c, i) => (
         <Card key={i}>
           <div className="text-sm">
             <span className="font-medium">{c.action}</span>{" "}

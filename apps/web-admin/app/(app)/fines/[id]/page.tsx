@@ -30,7 +30,7 @@ type Custody = {
   occurred_at: string;
 };
 
-type Fine = {
+type FineFields = {
   id: string;
   plate: string;
   offence_code: string;
@@ -41,6 +41,12 @@ type Fine = {
   due_at: string;
   issued_by: string;
   escalation_stage: number;
+};
+
+// Backend returns the fine fields nested under "fine" with parallel
+// evidence and custody arrays.
+type FineDetail = {
+  fine: FineFields;
   evidence?: Evidence[];
   custody?: Custody[];
 };
@@ -56,7 +62,7 @@ const STAGE_LABEL: Record<number, string> = {
 export default function FineDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { session } = useSession();
-  const [fine, setFine] = useState<Fine | null>(null);
+  const [data, setData] = useState<FineDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -66,7 +72,7 @@ export default function FineDetailPage() {
       const r = await services.fines(`/v1/fines/${id}`, {
         token: session.accessToken, tenant: session.user.tenant,
       });
-      setFine(r as Fine);
+      setData(r as FineDetail);
     } catch (e: any) {
       setErr(e?.message ?? "Failed to load");
     }
@@ -74,13 +80,13 @@ export default function FineDetailPage() {
   useEffect(() => { load(); }, [load]);
 
   async function cancelFine() {
-    if (!session || !fine) return;
+    if (!session || !data) return;
     const reason = window.prompt(
       "Cancellation reason (will be recorded in the audit log):");
     if (!reason || !reason.trim()) return;
     setBusy(true);
     try {
-      await services.fines(`/v1/fines/${fine.id}/cancel`, {
+      await services.fines(`/v1/fines/${data.fine.id}/cancel`, {
         method: "POST", body: { reason: reason.trim() },
         token: session.accessToken, tenant: session.user.tenant,
       });
@@ -93,7 +99,10 @@ export default function FineDetailPage() {
   }
 
   if (err) return <Card className="text-red-700">Couldn't load: {err}</Card>;
-  if (!fine) return <Card>Loading…</Card>;
+  if (!data) return <Card>Loading…</Card>;
+  const fine = data.fine;
+  const evidence = data.evidence ?? [];
+  const custody = data.custody ?? [];
 
   const isOpen = ["issued", "warned", "overdue", "escalated"].includes(fine.status);
 
@@ -137,7 +146,7 @@ export default function FineDetailPage() {
 
       <Card className="p-0 overflow-hidden">
         <div className="bg-slate-50 px-4 py-2 text-sm font-medium">
-          Evidence ({(fine.evidence ?? []).length})
+          Evidence ({evidence.length})
         </div>
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-600">
@@ -149,7 +158,7 @@ export default function FineDetailPage() {
             </tr>
           </thead>
           <tbody>
-            {(fine.evidence ?? []).map((e, i) => (
+            {evidence.map((e, i) => (
               <tr key={i} className="border-t border-slate-100">
                 <td className="p-3"><Pill>{e.kind}</Pill></td>
                 <td className="p-3">{new Date(e.taken_at).toLocaleString()}</td>
@@ -157,7 +166,7 @@ export default function FineDetailPage() {
                 <td className="p-3 font-mono text-xs break-all">{e.sha256.slice(0, 32)}…</td>
               </tr>
             ))}
-            {(fine.evidence ?? []).length === 0 && (
+            {evidence.length === 0 && (
               <tr><td className="p-6 text-center text-red-600" colSpan={4}>
                 No evidence — this should be impossible (anti-corruption gate).
               </td></tr>
@@ -168,7 +177,7 @@ export default function FineDetailPage() {
 
       <Card className="p-0 overflow-hidden">
         <div className="bg-slate-50 px-4 py-2 text-sm font-medium">
-          Chain of custody ({(fine.custody ?? []).length})
+          Chain of custody ({custody.length})
         </div>
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-600">
@@ -180,7 +189,7 @@ export default function FineDetailPage() {
             </tr>
           </thead>
           <tbody>
-            {(fine.custody ?? []).map((c, i) => (
+            {custody.map((c, i) => (
               <tr key={i} className="border-t border-slate-100 align-top">
                 <td className="p-3 text-xs">{new Date(c.occurred_at).toLocaleString()}</td>
                 <td className="p-3"><Pill>{c.action}</Pill></td>
@@ -191,7 +200,7 @@ export default function FineDetailPage() {
                 <td className="p-3 font-mono text-xs">{c.actor_device ?? "—"}</td>
               </tr>
             ))}
-            {(fine.custody ?? []).length === 0 && (
+            {custody.length === 0 && (
               <tr><td className="p-6 text-center text-slate-500" colSpan={4}>
                 No custody events recorded.
               </td></tr>
