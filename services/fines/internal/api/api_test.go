@@ -792,6 +792,175 @@ func TestListIssuedByMe_OnlyMyIssuance(t *testing.T) {
 	}
 }
 
+// TestResolveDispute_Accepted_CancelsFine: admin accepts a citizen
+// dispute — the fine flips to cancelled, the dispute row records the
+// outcome+note+resolved_at, and a fine.cancelled outbox event lands
+// so the notifications consumer can wake the citizen.
+func TestResolveDispute_Accepted_CancelsFine(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	officerTok, _ := env.Token("officer", "fines:create")
+	citizenTok, citizenID := env.Token("citizen")
+	adminTok, _ := env.Token("admin", "fines:cancel")
+	linkVehicleToCitizen(t, env, plate, citizenID)
+
+	h := build(env)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	var issued struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
+
+	// Citizen disputes.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines/"+issued.ID+"/dispute",
+		`{"reason":"camera misread the plate"}`, citizenTok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("dispute: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Admin lists pending disputes.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/fines/disputes", "", adminTok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Items []struct {
+			ID     string `json:"id"`
+			FineID string `json:"fine_id"`
+		} `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &list)
+	var did string
+	for _, it := range list.Items {
+		if it.FineID == issued.ID {
+			did = it.ID
+			break
+		}
+	}
+	if did == "" {
+		t.Fatalf("dispute not in list: %s", rec.Body.String())
+	}
+
+	// Admin resolves: accepted (citizen wins).
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST",
+		"/v1/fines/"+issued.ID+"/disputes/"+did+"/resolve",
+		`{"outcome":"accepted","note":"plate genuinely unreadable"}`, adminTok))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("resolve: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Fine is cancelled, dispute is accepted.
+	var fineStatus, disputeStatus string
+	if err := env.QueryRow(
+		`SELECT status::text FROM fines WHERE id=$1`, issued.ID).
+		Scan(&fineStatus); err != nil {
+		t.Fatal(err)
+	}
+	if fineStatus != "cancelled" {
+		t.Fatalf("fine status: %s", fineStatus)
+	}
+	if err := env.QueryRow(
+		`SELECT status FROM fine_disputes WHERE id=$1::uuid`, did).
+		Scan(&disputeStatus); err != nil {
+		t.Fatal(err)
+	}
+	if disputeStatus != "accepted" {
+		t.Fatalf("dispute status: %s", disputeStatus)
+	}
+
+	// fine.cancelled event landed in the outbox.
+	var n int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM event_outbox
+		  WHERE tenant_id=$1 AND envelope->>'type'='fine.cancelled'`,
+		env.Tenant).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Fatalf("expected fine.cancelled event, got %d", n)
+	}
+}
+
+// TestResolveDispute_Rejected_RestoresIssued: rejecting the dispute
+// flips the fine back to "issued" so the citizen still owes. The
+// dispute row records rejection but no fine.cancelled event fires.
+func TestResolveDispute_Rejected_RestoresIssued(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	officerTok, _ := env.Token("officer", "fines:create")
+	citizenTok, citizenID := env.Token("citizen")
+	adminTok, _ := env.Token("admin", "fines:cancel")
+	linkVehicleToCitizen(t, env, plate, citizenID)
+
+	h := build(env)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	var issued struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines/"+issued.ID+"/dispute",
+		`{"reason":"unhappy with fine"}`, citizenTok))
+
+	var did string
+	_ = env.QueryRow(
+		`SELECT id::text FROM fine_disputes WHERE fine_id=$1::uuid`,
+		issued.ID).Scan(&did)
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST",
+		"/v1/fines/"+issued.ID+"/disputes/"+did+"/resolve",
+		`{"outcome":"rejected","note":"evidence is clear"}`, adminTok))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("resolve: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var fineStatus string
+	if err := env.QueryRow(
+		`SELECT status::text FROM fines WHERE id=$1`, issued.ID).
+		Scan(&fineStatus); err != nil {
+		t.Fatal(err)
+	}
+	if fineStatus != "issued" {
+		t.Fatalf("fine status after rejection: %s (want issued)", fineStatus)
+	}
+}
+
+// TestResolveDispute_BadOutcome: any value other than accepted /
+// rejected / court is a 400.
+func TestResolveDispute_BadOutcome(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	officerTok, _ := env.Token("officer", "fines:create")
+	citizenTok, citizenID := env.Token("citizen")
+	adminTok, _ := env.Token("admin", "fines:cancel")
+	linkVehicleToCitizen(t, env, plate, citizenID)
+
+	h := build(env)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	var issued struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
+	h.ServeHTTP(httptest.NewRecorder(), env.Req("POST",
+		"/v1/fines/"+issued.ID+"/dispute", `{"reason":"x"}`, citizenTok))
+	var did string
+	_ = env.QueryRow(
+		`SELECT id::text FROM fine_disputes WHERE fine_id=$1::uuid`,
+		issued.ID).Scan(&did)
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST",
+		"/v1/fines/"+issued.ID+"/disputes/"+did+"/resolve",
+		`{"outcome":"banana"}`, adminTok))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad outcome: want 400, got %d", rec.Code)
+	}
+}
+
 // TestGet_OwnerCanRead_NonOwner403: the citizen who owns the
 // vehicle/fine sees full details (evidence, custody) on
 // GET /v1/fines/{id} without holding fines:read; an unrelated

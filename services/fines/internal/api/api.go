@@ -82,6 +82,12 @@ func New(cfg config.Service, log *slog.Logger, pool, adminPool *pgxpool.Pool,
 	mux.Handle("GET  /v1/fines/{id}",     issuer.Middleware(http.HandlerFunc(a.get)))
 	mux.Handle("POST /v1/fines/{id}/pay", issuer.Middleware(http.HandlerFunc(a.handlePay)))
 	mux.Handle("POST /v1/fines/{id}/dispute", issuer.Middleware(http.HandlerFunc(a.dispute)))
+	// Admin dispute review surface. fines:cancel is the admin-tier
+	// permission already used by /cancel and the reaper trigger.
+	mux.Handle("GET  /v1/fines/disputes",
+		issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.listDisputes))))
+	mux.Handle("POST /v1/fines/{id}/disputes/{did}/resolve",
+		issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.resolveDispute))))
 	mux.Handle("POST /v1/fines/{id}/cancel",  issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.cancel))))
 	mux.Handle("GET  /v1/fines/payments/health",
 		issuer.Middleware(http.HandlerFunc(a.paymentsHealth)))
@@ -751,6 +757,178 @@ func (a *API) dispute(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = a.audit.Emit(r.Context(), "fine.dispute", "fine", id.String(), nil, in)
 	w.WriteHeader(http.StatusCreated)
+}
+
+// listDisputes returns recent disputes filtered by status. Default
+// is "pending" — that's the bucket admins triage. Returns up to 200
+// rows newest-first joined with the parent fine's plate + offence.
+func (a *API) listDisputes(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	if status == "" {
+		status = "pending"
+	}
+	conn, err := db.WithTenant(r.Context(), a.pool)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer conn.Release()
+	rows, err := conn.Query(r.Context(),
+		`SELECT d.id, d.fine_id, f.plate, f.offence_code, f.amount::text, f.currency,
+		        d.filed_by, d.reason, d.status, d.filed_at,
+		        d.resolution, d.resolved_at
+		   FROM fine_disputes d
+		   JOIN fines f ON f.id = d.fine_id
+		  WHERE d.status = $1
+		  ORDER BY d.filed_at DESC LIMIT 200`, status)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer rows.Close()
+
+	type item struct {
+		ID          uuid.UUID  `json:"id"`
+		FineID      uuid.UUID  `json:"fine_id"`
+		Plate       string     `json:"plate"`
+		OffenceCode string     `json:"offence_code"`
+		Amount      string     `json:"amount"`
+		Currency    string     `json:"currency"`
+		FiledBy     uuid.UUID  `json:"filed_by"`
+		Reason      string     `json:"reason"`
+		Status      string     `json:"status"`
+		FiledAt     time.Time  `json:"filed_at"`
+		Resolution  *string    `json:"resolution"`
+		ResolvedAt  *time.Time `json:"resolved_at"`
+	}
+	out := []item{}
+	for rows.Next() {
+		var it item
+		if err := rows.Scan(&it.ID, &it.FineID, &it.Plate, &it.OffenceCode,
+			&it.Amount, &it.Currency, &it.FiledBy, &it.Reason, &it.Status,
+			&it.FiledAt, &it.Resolution, &it.ResolvedAt); err != nil {
+			httpx.WriteErr(w, err)
+			return
+		}
+		out = append(out, it)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+// resolveDispute applies an admin's verdict on a citizen's dispute.
+// Outcome maps to fine status:
+//
+//	accepted (citizen wins)  → fine.status='cancelled' (with a system reason)
+//	rejected (citizen loses) → fine.status='issued'    (the disputed flag clears)
+//	court    (escalation)     → fine.status='court'   (out of admin remedy)
+//
+// Always writes a fine_disputes update and an audit event in the
+// same tx as the fines update.
+func (a *API) resolveDispute(w http.ResponseWriter, r *http.Request) {
+	fineID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteErr(w, httpx.ErrBadRequest)
+		return
+	}
+	disputeID, err := uuid.Parse(r.PathValue("did"))
+	if err != nil {
+		httpx.WriteErr(w, httpx.ErrBadRequest)
+		return
+	}
+	type req struct {
+		Outcome string `json:"outcome"` // accepted | rejected | court
+		Note    string `json:"note"`
+	}
+	var in req
+	if err := httpx.ReadJSON(r, &in); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	switch in.Outcome {
+	case "accepted", "rejected", "court":
+	default:
+		httpx.WriteErr(w, httpx.Err(http.StatusBadRequest, "bad_outcome",
+			"outcome must be accepted, rejected, or court"))
+		return
+	}
+
+	c := auth.ClaimsFrom(r.Context())
+	conn, err := db.WithTenant(r.Context(), a.pool)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer conn.Release()
+	tx, err := conn.Begin(r.Context())
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	// Confirm the dispute belongs to this fine and is still pending.
+	var status string
+	if err := tx.QueryRow(r.Context(),
+		`SELECT status FROM fine_disputes WHERE id=$1 AND fine_id=$2 FOR UPDATE`,
+		disputeID, fineID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+		httpx.WriteErr(w, httpx.ErrNotFound)
+		return
+	} else if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	if status != "pending" {
+		httpx.WriteErr(w, httpx.Err(http.StatusConflict, "already_resolved",
+			"dispute is "+status))
+		return
+	}
+
+	// Map outcome to fine status.
+	fineStatus := map[string]string{
+		"accepted": "cancelled",
+		"rejected": "issued",
+		"court":    "court",
+	}[in.Outcome]
+
+	if _, err := tx.Exec(r.Context(),
+		`UPDATE fine_disputes
+		    SET status=$2, resolution=NULLIF($3,''), resolved_at=now()
+		  WHERE id=$1`, disputeID, in.Outcome, in.Note); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	if _, err := tx.Exec(r.Context(),
+		`UPDATE fines SET status=$2::fine_status WHERE id=$1`,
+		fineID, fineStatus); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+
+	// Outbox a fine.cancelled event when the citizen wins so
+	// notifications fire ("your dispute was upheld").
+	if in.Outcome == "accepted" {
+		env := events.EnvelopeFromContext(r.Context(), "fines", c.TenantID,
+			events.TypeFineCancelled, 1,
+			events.FineCancelledPayload{
+				FineID: fineID.String(),
+				Reason: "dispute upheld: " + in.Note,
+			})
+		if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
+			httpx.WriteErr(w, err)
+			return
+		}
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	_ = a.audit.Emit(r.Context(), "fine.dispute.resolve", "fine_dispute",
+		disputeID.String(),
+		map[string]any{"prior_status": "pending"},
+		map[string]any{"outcome": in.Outcome, "note": in.Note,
+			"fine_id": fineID.String(), "new_fine_status": fineStatus})
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *API) cancel(w http.ResponseWriter, r *http.Request) {

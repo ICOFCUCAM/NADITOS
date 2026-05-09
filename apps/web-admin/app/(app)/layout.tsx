@@ -6,14 +6,15 @@ import { useEffect } from "react";
 import { useSession } from "@naditos/web-common";
 
 const NAV = [
-  { href: "/",         label: "Dashboard" },
-  { href: "/vehicles", label: "Vehicles" },
-  { href: "/licenses", label: "Driver licenses" },
-  { href: "/fines",    label: "Fines" },
-  { href: "/anpr",     label: "ANPR feed" },
-  { href: "/officers", label: "Officer activity" },
+  { href: "/",          label: "Dashboard" },
+  { href: "/vehicles",  label: "Vehicles" },
+  { href: "/licenses",  label: "Driver licenses" },
+  { href: "/fines",     label: "Fines" },
+  { href: "/disputes",  label: "Disputes" },
+  { href: "/anpr",      label: "ANPR feed" },
+  { href: "/officers",  label: "Officer activity" },
   { href: "/providers", label: "Provider health" },
-  { href: "/audit",    label: "Audit" },
+  { href: "/audit",     label: "Audit" },
 ];
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
