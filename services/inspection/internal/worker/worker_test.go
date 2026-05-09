@@ -84,13 +84,20 @@ func waitForJobStatus(t *testing.T, env *testkit.Env, tenant string, want string
 // worker results in the verifier being called and the job marked done.
 func TestWorker_DrainsJob(t *testing.T) {
 	env := testkit.Setup(t)
+	expires := time.Now().Add(365 * 24 * time.Hour).UTC().Truncate(time.Second)
 	stub := &stubVerifier{rec: &inspection.Record{Station: "TÜV-1", Result: "pass",
-		PerformedAt: time.Now(), ExpiresAt: time.Now().Add(365 * 24 * time.Hour)}}
+		PerformedAt: time.Now(), ExpiresAt: expires}}
 	w := build(env, stub)
+
+	// Seed a vehicle so the worker has somewhere to persist the record.
+	plate := "AB-12-CD"
+	vid := uuid.New()
+	env.Exec(`INSERT INTO vehicles (id, tenant_id, plate)
+	          VALUES ($1, $2, $3)`, vid, env.Tenant, plate)
 
 	q := connectors.NewRetryQueue(env.AdminPool())
 	if _, err := q.Enqueue(context.Background(), env.Tenant, "inspection", "verify",
-		map[string]string{"plate": "AB-12-CD", "vehicle_id": uuid.NewString()}, 5); err != nil {
+		map[string]string{"plate": plate, "vehicle_id": vid.String()}, 5); err != nil {
 		t.Fatal(err)
 	}
 
@@ -101,9 +108,33 @@ func TestWorker_DrainsJob(t *testing.T) {
 	waitForJobStatus(t, env, env.Tenant, "done")
 
 	stub.mu.Lock()
-	defer stub.mu.Unlock()
-	if len(stub.called) != 1 || stub.called[0] != "AB-12-CD" {
+	if len(stub.called) != 1 || stub.called[0] != plate {
+		stub.mu.Unlock()
 		t.Fatalf("verifier called=%v", stub.called)
+	}
+	stub.mu.Unlock()
+
+	// Persistence: the inspection_records row is the audit trail; the
+	// vehicle's inspection_expires_at is the operational state used by
+	// the compliance lookup.
+	var n int
+	if err := env.QueryRow(
+		`SELECT count(*) FROM inspection_records
+		  WHERE tenant_id=$1 AND vehicle_id=$2::uuid AND result='pass'`,
+		env.Tenant, vid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("want 1 inspection_records row, got %d", n)
+	}
+	var got time.Time
+	if err := env.QueryRow(
+		`SELECT inspection_expires_at FROM vehicles WHERE id=$1::uuid`,
+		vid).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(expires) {
+		t.Fatalf("inspection_expires_at: want %v got %v", expires, got)
 	}
 }
 

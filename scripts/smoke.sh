@@ -40,10 +40,20 @@ PIDS=()
 cleanup() {
   echo "→ stopping services"
   for pid in "${PIDS[@]:-}"; do
-    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    [ -z "$pid" ] && continue
+    # `go run` spawns the actual binary as a child; orphaning the
+    # parent leaves the binary running and holding the listen port.
+    # Walk the process tree from each parent and kill children first.
+    pkill -KILL -P "$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
   done
+  # Belt-and-braces: anyone listening on a smoke port we didn't track.
+  # SIGKILL because go run's child swallows SIGTERM.
+  lsof -i:8001-8009 -t 2>/dev/null | xargs -r kill -KILL 2>/dev/null || true
+  # Redirect wait's "Killed" stderr — those are just the SIGKILL'd
+  # subshells reporting their own death, not test failures.
   wait 2>/dev/null || true
-}
+} 2>/dev/null
 trap cleanup EXIT INT TERM
 
 # ─── 1. migrations ──────────────────────────────────────────────────────
