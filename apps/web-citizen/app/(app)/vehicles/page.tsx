@@ -14,8 +14,10 @@ type Vehicle = {
   model?: string | null;
   year?: number | null;
   status: VehicleStatus;
+  registration_expires_at?: string | null;
   insurance_expires_at?: string | null;
   inspection_expires_at?: string | null;
+  tax_paid_through?: string | null;
   is_stolen: boolean;
   is_seized: boolean;
 };
@@ -100,9 +102,11 @@ export default function MyVehiclesPage() {
                 {statusLabel[v.status]}
               </span>
             </div>
-            <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-500">
+            <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-500">
+              <div>Registration: {expiryBadge(v.registration_expires_at)}</div>
               <div>Insurance: {expiryBadge(v.insurance_expires_at)}</div>
               <div>Inspection: {expiryBadge(v.inspection_expires_at)}</div>
+              <div>Road tax paid through: {expiryBadge(v.tax_paid_through)}</div>
             </div>
             {(v.is_stolen || v.is_seized) && (
               <div className="mt-2 flex flex-wrap gap-1">
