@@ -122,6 +122,60 @@ func TestOwners_LinkVehicle_Transfer(t *testing.T) {
 }
 
 // ─── Citizen self-claim ────────────────────────────────────────────────────
+// TestMyVehicles_ResponseShape pins the GET /v1/citizens/me/vehicles
+// envelope: { items: Vehicle[] } where each Vehicle includes the
+// status field the citizen page renders. Catches a refactor that
+// would silently break the citizen vehicles list.
+func TestMyVehicles_ResponseShape(t *testing.T) {
+	env := testkit.Setup(t)
+	grantOwnersSelf(t, env)
+	tok, citizenID := env.Token("citizen", "owners:self")
+	h := build(env)
+
+	// Citizen claims, admin creates a vehicle and links it.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/citizens/me/owner",
+		`{"full_name":"Owner X","email":"x@example.com"}`, tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("claim: %d %s", rec.Code, rec.Body.String())
+	}
+	var claimed struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &claimed)
+
+	// Insert vehicle directly + link to owner.
+	plate := "MV-" + uuid.NewString()[:6]
+	env.Exec(`INSERT INTO vehicles (tenant_id, plate, owner_id)
+	          VALUES ($1, $2, $3::uuid)`,
+		env.Tenant, plate, claimed.ID)
+
+	// Confirm via GET.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/citizens/me/vehicles", "", tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Items []struct {
+			ID     string `json:"id"`
+			Plate  string `json:"plate"`
+			Status string `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items: want 1, got %d", len(resp.Items))
+	}
+	if resp.Items[0].Plate != plate {
+		t.Errorf("plate: %s", resp.Items[0].Plate)
+	}
+	if resp.Items[0].Status == "" {
+		t.Error("status empty (v_vehicle_status join didn't populate)")
+	}
+	_ = citizenID // used implicitly via env.Token's user-row insert
+}
+
 // TestOwners_GetMyOwner_RoundTrip: claim → GET returns the same row.
 // Drives the citizen profile UI's pre-populate path. Pre-claim, GET
 // must 404 so the UI can render an empty form instead of waiting on
