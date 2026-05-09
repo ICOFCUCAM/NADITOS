@@ -74,12 +74,15 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, err)
 		return
 	}
+	tenantSrc := "body"
 	tenant := req.Tenant
 	if tenant == "" {
 		tenant = r.Header.Get("X-Tenant-Id")
+		tenantSrc = "header"
 	}
 	if tenant == "" {
 		tenant = a.cfg.DefaultTenant
+		tenantSrc = "default"
 	}
 	lg := a.log.With(
 		slog.String("rid", rid),
@@ -87,7 +90,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		slog.String("tenant", tenant),
 		slog.String("email", req.Email),
 	)
-	lg.Info("login: start")
+	lg.Info("login: start", slog.String("tenant_src", tenantSrc))
 
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
@@ -138,7 +141,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role, perms, err := loadRoleAndPerms(ctx, tx, tenant, userID)
+	role, perms, err := loadRoleAndPerms(withLogger(ctx, lg), tx, tenant, userID)
 	if err != nil {
 		lg.Error("login: load role/perms failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
@@ -242,7 +245,7 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role, perms, err := loadRoleAndPerms(ctx, tx, tenant, userID)
+	role, perms, err := loadRoleAndPerms(withLogger(ctx, lg), tx, tenant, userID)
 	if err != nil {
 		lg.Error("refresh: load role/perms failed",
 			slog.String("user_id", userID.String()), slog.String("err", err.Error()))
@@ -388,11 +391,22 @@ type Querier interface {
 
 // loadRoleAndPerms returns the user's primary role and flattened permissions.
 // The "primary" role is admin > court > customs > officer > citizen, in that order.
+//
+// The function does its own per-stage logging so that "login: load role/perms
+// failed" in the caller is always paired with a precise reason (which query,
+// which scan) here. lg may be nil — useful for tests and the seed CLI.
 func loadRoleAndPerms(ctx context.Context, conn Querier, tenant string, userID uuid.UUID) (string, []string, error) {
+	lg := loggerFromCtx(ctx).With(
+		slog.String("step", "load_role_perms"),
+		slog.String("tenant", tenant),
+		slog.String("user_id", userID.String()),
+	)
+
 	rows, err := conn.Query(ctx,
 		`SELECT role_code FROM user_roles WHERE tenant_id=$1 AND user_id=$2`,
 		tenant, userID)
 	if err != nil {
+		lg.Error("user_roles query failed", slog.String("err", err.Error()))
 		return "", nil, err
 	}
 	roles := []string{}
@@ -400,12 +414,14 @@ func loadRoleAndPerms(ctx context.Context, conn Querier, tenant string, userID u
 		var r string
 		if err := rows.Scan(&r); err != nil {
 			rows.Close()
+			lg.Error("user_roles scan failed", slog.String("err", err.Error()))
 			return "", nil, err
 		}
 		roles = append(roles, r)
 	}
 	rows.Close()
 	if len(roles) == 0 {
+		lg.Info("no roles assigned, defaulting to citizen")
 		return "citizen", nil, nil
 	}
 	primary := pickPrimary(roles)
@@ -415,6 +431,8 @@ func loadRoleAndPerms(ctx context.Context, conn Querier, tenant string, userID u
 		   WHERE tenant_id=$1 AND role_code = ANY($2)`,
 		tenant, roles)
 	if err != nil {
+		lg.Error("role_permissions query failed",
+			slog.Any("roles", roles), slog.String("err", err.Error()))
 		return "", nil, err
 	}
 	defer prows.Close()
@@ -422,11 +440,26 @@ func loadRoleAndPerms(ctx context.Context, conn Querier, tenant string, userID u
 	for prows.Next() {
 		var p string
 		if err := prows.Scan(&p); err != nil {
+			lg.Error("role_permissions scan failed", slog.String("err", err.Error()))
 			return "", nil, err
 		}
 		perms = append(perms, p)
 	}
 	return primary, perms, nil
+}
+
+type loggerCtxKey struct{}
+
+// withLogger / loggerFromCtx let helper functions inherit the per-request
+// logger (rid, tenant, email) without changing their public signatures.
+func withLogger(ctx context.Context, lg *slog.Logger) context.Context {
+	return context.WithValue(ctx, loggerCtxKey{}, lg)
+}
+func loggerFromCtx(ctx context.Context) *slog.Logger {
+	if v, ok := ctx.Value(loggerCtxKey{}).(*slog.Logger); ok && v != nil {
+		return v
+	}
+	return slog.Default()
 }
 
 func pickPrimary(roles []string) string {
