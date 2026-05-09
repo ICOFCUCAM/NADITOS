@@ -27,7 +27,7 @@ import (
 )
 
 func main() {
-	cfg := config.MustLoad("notifications", 8009)
+	cfg := config.MustLoadWithDB("notifications", 8009)
 	log := logger.New(cfg.LogLevel)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

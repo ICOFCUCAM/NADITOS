@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	cfg := config.MustLoad("registry", 8002)
+	cfg := config.MustLoadWithDB("registry", 8002)
 	log := logger.New(cfg.LogLevel)
 
 	ctx := context.Background()

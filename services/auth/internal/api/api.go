@@ -4,7 +4,6 @@ package api
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -28,32 +27,12 @@ type API struct {
 }
 
 func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool) http.Handler {
-	if log == nil {
-		panic("api.New: log is nil")
-	}
-	if pool == nil {
-		log.Error("api.New: pool is nil — would crash at first DB call")
-		panic("api.New: pool is nil")
-	}
-	if cfg.JWTSecret == "" {
-		log.Error("api.New: cfg.JWTSecret is empty — JWT signing would fail")
-		panic("api.New: cfg.JWTSecret is empty")
-	}
-	issuer := auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
-	if issuer == nil {
-		log.Error("api.New: auth.NewIssuer returned nil")
-		panic("api.New: issuer is nil")
-	}
 	a := &API{
 		cfg:    cfg,
 		log:    log,
 		pool:   pool,
-		issuer: issuer,
+		issuer: auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL),
 	}
-	log.Info("api.New: wired",
-		slog.Int("jwt_secret_len", len(cfg.JWTSecret)),
-		slog.String("default_tenant", cfg.DefaultTenant),
-	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/auth/login",   a.handleLogin)
 	mux.HandleFunc("POST /v1/auth/refresh", a.handleRefresh)
@@ -88,31 +67,6 @@ type meResp struct {
 func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rid, _, _ := observability.IDs(ctx)
-
-	// Flight-recorder line: written directly to stderr so it survives
-	// any slog-level filtering and any panic that happens before the
-	// first slog call. If you don't see this line for a request that
-	// reaches /v1/auth/login, the binary is not built from this source.
-	fmt.Fprintf(os.Stderr, "LOGIN_HANDLER_ENTERED rid=%s ct=%q ua=%q\n",
-		rid, r.Header.Get("Content-Type"), r.Header.Get("User-Agent"))
-
-	if a == nil {
-		fmt.Fprintln(os.Stderr, "LOGIN_FATAL a==nil")
-		http.Error(w, `{"code":"internal","message":"nil receiver"}`, http.StatusInternalServerError)
-		return
-	}
-	if a.pool == nil {
-		fmt.Fprintln(os.Stderr, "LOGIN_FATAL a.pool==nil")
-		a.log.Error("login: pool is nil", slog.String("rid", rid))
-		http.Error(w, `{"code":"internal","message":"nil pool"}`, http.StatusInternalServerError)
-		return
-	}
-	if a.issuer == nil {
-		fmt.Fprintln(os.Stderr, "LOGIN_FATAL a.issuer==nil")
-		a.log.Error("login: issuer is nil", slog.String("rid", rid))
-		http.Error(w, `{"code":"internal","message":"nil issuer"}`, http.StatusInternalServerError)
-		return
-	}
 
 	var req loginReq
 	if err := httpx.ReadJSON(r, &req); err != nil {
@@ -347,12 +301,33 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAdminCreateUser is a bootstrapping endpoint used by seed scripts.
-// In production, this must be behind admin RBAC; we accept tenant from
-// the X-Tenant-Id header and require ADMIN_BOOTSTRAP_KEY env or an admin JWT.
+// handleAdminCreateUser is the user-creation endpoint used by seed scripts
+// and by admin UIs. It accepts either of two forms of authorization,
+// checked in order:
+//
+//  1. An ADMIN_BOOTSTRAP_KEY shared secret presented in the
+//     X-Admin-Bootstrap-Key request header. Intended for first-run
+//     seeding (no admin user exists yet to issue an admin JWT).
+//  2. A valid bearer JWT whose role == "admin". Intended for ongoing
+//     user-management calls from an authenticated admin UI.
+//
+// If ADMIN_BOOTSTRAP_KEY is unset in env the bootstrap path is closed
+// (the only way in is then an admin JWT). Either form is sufficient on
+// its own — operators can rotate the bootstrap key and rely on the JWT
+// path once the first admin exists.
 func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rid, _, _ := observability.IDs(ctx)
+
+	if !a.adminAuthorized(r) {
+		a.log.Warn("admin_create_user: unauthorized",
+			slog.String("rid", rid),
+			slog.Bool("had_bootstrap_header", r.Header.Get("X-Admin-Bootstrap-Key") != ""),
+			slog.Bool("had_bearer", auth.BearerToken(r) != ""),
+		)
+		httpx.WriteErr(w, httpx.ErrUnauthorized)
+		return
+	}
 
 	type req struct {
 		Email    string   `json:"email"`
@@ -429,6 +404,46 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	lg.Info("admin_create_user: success", slog.String("user_id", id.String()))
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": id.String()})
+}
+
+// adminAuthorized returns true iff the request carries either:
+//   - the ADMIN_BOOTSTRAP_KEY env value in the X-Admin-Bootstrap-Key
+//     header (constant-time compared, so timing attacks don't leak it),
+//     or
+//   - a bearer JWT whose role claim is "admin" and which verifies under
+//     the service's signing secret.
+//
+// Returns false if neither is present or both are present-but-invalid.
+// An empty/missing ADMIN_BOOTSTRAP_KEY closes the shared-secret path.
+func (a *API) adminAuthorized(r *http.Request) bool {
+	if k := os.Getenv("ADMIN_BOOTSTRAP_KEY"); k != "" {
+		got := r.Header.Get("X-Admin-Bootstrap-Key")
+		// subtle.ConstantTimeCompare needs equal-length inputs; do a fast
+		// length check first (length isn't sensitive, the bytes are).
+		if len(got) == len(k) && subtleEq(got, k) {
+			return true
+		}
+	}
+	if tok := auth.BearerToken(r); tok != "" {
+		if c, err := a.issuer.Parse(tok); err == nil && c != nil && c.Role == "admin" {
+			return true
+		}
+	}
+	return false
+}
+
+// subtleEq is a tiny constant-time equality check. We use strings rather
+// than []byte to avoid a copy at the call site; both inputs are already
+// strings.
+func subtleEq(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var v byte
+	for i := 0; i < len(a); i++ {
+		v |= a[i] ^ b[i]
+	}
+	return v == 0
 }
 
 // Querier is the small subset of pgx we need; both *pgx.Conn and pgx.Tx satisfy it.

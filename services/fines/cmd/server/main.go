@@ -20,7 +20,7 @@ import (
 )
 
 func main() {
-	cfg := config.MustLoad("fines", 8006)
+	cfg := config.MustLoadWithDB("fines", 8006)
 	log := logger.New(cfg.LogLevel)
 
 	ctx := context.Background()

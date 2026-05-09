@@ -26,7 +26,7 @@ import (
 )
 
 func main() {
-	cfg := config.MustLoad("inspection", 8005)
+	cfg := config.MustLoadWithDB("inspection", 8005)
 	log := logger.New(cfg.LogLevel)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

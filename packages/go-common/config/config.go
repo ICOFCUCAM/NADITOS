@@ -23,11 +23,16 @@ type Service struct {
 	DefaultCountry string
 }
 
+// MustLoad returns the standard service config. JWT_SECRET is always
+// required — every service signs or verifies tokens. DATABASE_URL is
+// optional here because some services (the gateway) don't talk to
+// Postgres; services that do must call MustLoadWithDB or check
+// cfg.DatabaseURL themselves.
 func MustLoad(name string, defaultPort int) Service {
 	c := Service{
 		Name:           name,
 		Port:           getInt("SERVICE_PORT", defaultPort),
-		DatabaseURL:    must("DATABASE_URL"),
+		DatabaseURL:    getStr("DATABASE_URL", ""),
 		RedisURL:       getStr("REDIS_URL", ""),
 		JWTSecret:      must("JWT_SECRET"),
 		AccessTTL:      getDur("JWT_ACCESS_TTL", 15*time.Minute),
@@ -37,6 +42,17 @@ func MustLoad(name string, defaultPort int) Service {
 		DefaultTenant:  getStr("NEXT_PUBLIC_DEFAULT_TENANT", "demo"),
 		DefaultLocale:  getStr("DEFAULT_LOCALE", "en"),
 		DefaultCountry: getStr("DEFAULT_COUNTRY", "XX"),
+	}
+	return c
+}
+
+// MustLoadWithDB is MustLoad plus a strict DATABASE_URL check. Use this
+// from main() of services that connect to Postgres. Failing fast at
+// startup with a named env var beats panicking on the first request.
+func MustLoadWithDB(name string, defaultPort int) Service {
+	c := MustLoad(name, defaultPort)
+	if c.DatabaseURL == "" {
+		panic(errors.New("missing env var: DATABASE_URL"))
 	}
 	return c
 }

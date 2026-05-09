@@ -27,7 +27,7 @@ func main() {
 	mode := flag.String("mode", "both", "api|worker|both")
 	flag.Parse()
 
-	cfg := config.MustLoad("anpr-gateway", 8008)
+	cfg := config.MustLoadWithDB("anpr-gateway", 8008)
 	log := logger.New(cfg.LogLevel)
 
 	ctx, cancel := context.WithCancel(context.Background())

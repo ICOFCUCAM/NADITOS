@@ -26,14 +26,20 @@ func build(env *testkit.Env) http.Handler {
 }
 
 // seedUser creates a user via /v1/admin/users so we get the same
-// password-hash + role-link path the smoke uses.
+// password-hash + role-link path the smoke uses. The admin endpoint is
+// gated by ADMIN_BOOTSTRAP_KEY or an admin JWT; tests use the bootstrap
+// key path because there's no admin user to log in as yet.
+const testBootstrapKey = "test-bootstrap-key"
+
 func seedUser(t *testing.T, env *testkit.Env, h http.Handler, email, password, role string) {
 	t.Helper()
+	t.Setenv("ADMIN_BOOTSTRAP_KEY", testBootstrapKey)
 	body := `{"email":"` + email + `","password":"` + password +
 		`","full_name":"Test","roles":["` + role + `"]}`
 	r := httptest.NewRequest("POST", "/v1/admin/users", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-Tenant-Id", env.Tenant)
+	r.Header.Set("X-Admin-Bootstrap-Key", testBootstrapKey)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, r)
 	if rec.Code/100 != 2 {

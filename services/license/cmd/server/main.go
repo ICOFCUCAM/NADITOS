@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	cfg := config.MustLoad("license", 8003)
+	cfg := config.MustLoadWithDB("license", 8003)
 	log := logger.New(cfg.LogLevel)
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	cfg := config.MustLoad("audit", 8007)
+	cfg := config.MustLoadWithDB("audit", 8007)
 	log := logger.New(cfg.LogLevel)
 
 	ctx, cancel := context.WithCancel(context.Background())

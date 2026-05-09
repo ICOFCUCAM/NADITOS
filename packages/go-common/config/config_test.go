@@ -58,10 +58,22 @@ func TestMustLoad_PortOverride(t *testing.T) {
 	}
 }
 
-// TestMustLoad_PanicsOnMissingDatabaseURL: required env vars are
-// surfaced as a panic so a misconfigured deployment fails fast at
-// boot rather than 500-ing on every request.
-func TestMustLoad_PanicsOnMissingDatabaseURL(t *testing.T) {
+// TestMustLoad_AllowsMissingDatabaseURL: the gateway service has no DB
+// dependency, so MustLoad must accept an empty DATABASE_URL. Services
+// that need a DB call MustLoadWithDB instead.
+func TestMustLoad_AllowsMissingDatabaseURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("JWT_SECRET", "s")
+	c := config.MustLoad("svc", 8000)
+	if c.DatabaseURL != "" {
+		t.Fatalf("DatabaseURL: want empty, got %q", c.DatabaseURL)
+	}
+}
+
+// TestMustLoadWithDB_PanicsOnMissingDatabaseURL: services that connect
+// to Postgres should call MustLoadWithDB, which fails fast at boot
+// rather than 500-ing on every request.
+func TestMustLoadWithDB_PanicsOnMissingDatabaseURL(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 	t.Setenv("JWT_SECRET", "s")
 	defer func() {
@@ -69,7 +81,7 @@ func TestMustLoad_PanicsOnMissingDatabaseURL(t *testing.T) {
 			t.Fatal("expected panic on missing DATABASE_URL")
 		}
 	}()
-	_ = config.MustLoad("svc", 8000)
+	_ = config.MustLoadWithDB("svc", 8000)
 }
 
 // TestMustLoad_BadDurationFallsBackToDefault: a malformed

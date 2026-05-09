@@ -31,7 +31,7 @@ import (
 )
 
 func main() {
-	cfg := config.MustLoad("insurance", 8004)
+	cfg := config.MustLoadWithDB("insurance", 8004)
 	log := logger.New(cfg.LogLevel)
 
 	ctx, cancel := context.WithCancel(context.Background())
