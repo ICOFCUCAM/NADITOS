@@ -240,6 +240,43 @@
   }
 }
 
+/* — Compatibility overrides ————————————————————————————————
+ *
+ * The admin app has many existing pages that hardcode Tailwind
+ * slate-* utilities (text-slate-500, bg-slate-50, border-slate-100,
+ * hover:bg-slate-50, …). On the new .nadit-dark canvas these pixels
+ * are unreadable. Re-bind the most-used slate classes to semantic
+ * tokens inside .nadit-dark so unrefactored pages inherit the
+ * command-surface treatment automatically. New code should reach
+ * for var(--…) directly; this is a safety net, not the API. */
+.nadit-dark .text-slate-300, .nadit-dark .text-slate-400 { color: var(--fg-muted); }
+.nadit-dark .text-slate-500, .nadit-dark .text-slate-600 { color: var(--fg-muted); }
+.nadit-dark .text-slate-700                              { color: var(--fg-secondary); }
+.nadit-dark .text-slate-800, .nadit-dark .text-slate-900 { color: var(--fg-primary); }
+.nadit-dark .bg-white                                    { background-color: var(--bg-surface); }
+.nadit-dark .bg-slate-50                                 { background-color: var(--bg-hover); }
+.nadit-dark .bg-slate-100                                { background-color: var(--bg-hover); }
+.nadit-dark .bg-slate-200                                { background-color: var(--bg-elevated); }
+.nadit-dark .border-slate-100                            { border-color: var(--border-subtle); }
+.nadit-dark .border-slate-200                            { border-color: var(--border-default); }
+.nadit-dark .border-slate-300                            { border-color: var(--border-strong); }
+.nadit-dark .ring-slate-200                              { --tw-ring-color: var(--border-default); }
+.nadit-dark .ring-slate-300                              { --tw-ring-color: var(--border-strong); }
+.nadit-dark .hover\:bg-slate-50:hover                    { background-color: var(--bg-hover); }
+.nadit-dark .hover\:bg-slate-100:hover                   { background-color: var(--bg-hover); }
+.nadit-dark .hover\:bg-slate-700:hover                   { background-color: var(--bg-active); }
+/* Light text on dark inputs — old "border-slate-700 bg-slate-800 text-white"
+ * pattern still appears in legacy auth screens. */
+.nadit-dark input.bg-slate-800,
+.nadit-dark .bg-slate-800                                { background-color: var(--bg-elevated); }
+.nadit-dark .border-slate-700                            { border-color: var(--border-default); }
+/* Soft red surfaces used for error states (e.g. "Failed to load")
+ * in the admin Card with className="text-red-700". Map to the
+ * dark-surface readable variant. */
+.nadit-dark .text-red-600, .nadit-dark .text-red-700     { color: var(--c-bad-300); }
+.nadit-dark .text-emerald-700                            { color: var(--c-ok-300); }
+.nadit-dark .text-amber-700                              { color: var(--c-warn-300); }
+
 /* — Scanline / radar accents reserved for officer command surface — */
 .nadit-radar-grid {
   background-image:
