@@ -413,6 +413,59 @@ done
 }
 echo "  ✓ license.reinstated delivered"
 
+# ─── 12b. vehicle ownership transfer ───────────────────────────────────
+# Seller (the existing citizen) starts a transfer for the smoke
+# vehicle. A fresh buyer user is provisioned, claims an owners row,
+# accepts the code, and the vehicle's owner_id is asserted to have
+# flipped. Validates the path that the registry handlers + the
+# notifications consumer + the buyer-side render all work together.
+echo "→ transfer: provision buyer user"
+BUYER_EMAIL="buyer-$(date +%s)@demo"
+curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" \
+  -d "{\"email\":\"$BUYER_EMAIL\",\"password\":\"demo1234\",
+       \"full_name\":\"Demo buyer\",\"roles\":[\"citizen\"]}" >/dev/null
+
+BUYER=$(login "$BUYER_EMAIL" demo1234)
+BUYER_TOKEN=$(echo "$BUYER" | jq -r .access_token)
+[ -n "$BUYER_TOKEN" ] && [ "$BUYER_TOKEN" != null ] || {
+  echo "✗ buyer login failed: $BUYER"; exit 1; }
+
+curl -sS -o /dev/null -X POST http://localhost:8002/v1/citizens/me/owner \
+  "${H_TENANT[@]}" "${H_JSON[@]}" \
+  -H "Authorization: Bearer $BUYER_TOKEN" \
+  -d "{\"full_name\":\"Demo buyer\",\"email\":\"$BUYER_EMAIL\"}"
+echo "  ✓ buyer $BUYER_EMAIL provisioned"
+
+echo "→ transfer: seller starts transfer of $PLATE"
+START=$(curl -sS -X POST \
+  "http://localhost:8002/v1/citizens/me/vehicles/$VID/transfer" \
+  "${H_TENANT[@]}" "${H_JSON[@]}" \
+  -H "Authorization: Bearer $CITIZEN_TOKEN" \
+  -d "{\"to_contact\":\"$BUYER_EMAIL\"}")
+TRANSFER_CODE=$(echo "$START" | jq -r .code)
+[ -n "$TRANSFER_CODE" ] && [ "$TRANSFER_CODE" != null ] || {
+  echo "✗ transfer start failed: $START"; exit 1; }
+echo "  ✓ transfer code $TRANSFER_CODE issued"
+
+echo "→ transfer: buyer accepts"
+ACCEPT_RC=$(curl -sS -o /tmp/smoke.body -w '%{http_code}' \
+  -X POST http://localhost:8002/v1/citizens/me/transfers/accept \
+  "${H_TENANT[@]}" "${H_JSON[@]}" \
+  -H "Authorization: Bearer $BUYER_TOKEN" \
+  -d "{\"code\":\"$TRANSFER_CODE\"}")
+[ "$ACCEPT_RC" = 200 ] || {
+  echo "✗ accept failed: $ACCEPT_RC $(cat /tmp/smoke.body)"; exit 1; }
+
+# Confirm vehicle.owner_id now points at the buyer's owners row.
+NEW_OWNER=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+  "SELECT v.owner_id::text FROM vehicles v WHERE v.id='$VID'" | tr -d ' ')
+BUYER_OWNER=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+  "SELECT o.id::text FROM owners o JOIN users u ON u.id=o.user_id
+    WHERE u.email='$BUYER_EMAIL' AND u.tenant_id='$TENANT'" | tr -d ' ')
+[ "$NEW_OWNER" = "$BUYER_OWNER" ] || {
+  echo "✗ owner did not flip: vehicle=$NEW_OWNER buyer=$BUYER_OWNER"; exit 1; }
+echo "  ✓ vehicle owner flipped to buyer"
+
 # ─── 13. evidence retention reaper ─────────────────────────────────────
 # Backdate the smoke fine + force a 1-day retention policy, then trigger
 # the reaper and confirm the evidence row is sealed and the underlying
