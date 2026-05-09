@@ -125,6 +125,68 @@ func TestMyInbox_ReturnsOnlyMine(t *testing.T) {
 	}
 }
 
+// TestList_AdminEnvelopeShape pins the {items:[{id, channel, recipient,
+// status, provider, ...}]} shape that the admin /notifications page
+// consumes. A flatten or rename here would silently break the page.
+func TestList_AdminEnvelopeShape(t *testing.T) {
+	env := testkit.Setup(t)
+	tok, _ := env.Token("admin")
+	// Two records in different statuses so the response isn't trivially
+	// homogeneous.
+	env.Exec(`INSERT INTO notification_records
+	            (tenant_id, channel, recipient, body, template, status,
+	             provider, provider_ref, sent_at)
+	          VALUES ($1, 'email', 'a@example.com', 'b', 'fine.issued.v1',
+	                  'sent', 'noop', 'ref-1', now())`, env.Tenant)
+	env.Exec(`INSERT INTO notification_records
+	            (tenant_id, channel, recipient, body, status)
+	          VALUES ($1, 'sms', '+1', 'b', 'failed')`, env.Tenant)
+
+	rec := httptest.NewRecorder()
+	build(env).ServeHTTP(rec, env.Req("GET", "/v1/notify", "", tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Items []struct {
+			ID          string  `json:"id"`
+			Channel     string  `json:"channel"`
+			Recipient   string  `json:"recipient"`
+			Subject     string  `json:"subject"`
+			Template    *string `json:"template"`
+			Status      string  `json:"status"`
+			Provider    string  `json:"provider"`
+			ProviderRef string  `json:"provider_ref"`
+			CreatedAt   string  `json:"created_at"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Items) < 2 {
+		t.Fatalf("want >=2 items, got %d", len(out.Items))
+	}
+	// Find the failed-sms row and the sent-email row.
+	var sawSent, sawFailed bool
+	for _, it := range out.Items {
+		if it.ID == "" || it.Channel == "" || it.Recipient == "" || it.Status == "" {
+			t.Errorf("item missing required fields: %+v", it)
+		}
+		if it.Status == "sent" && it.Provider == "noop" && it.ProviderRef == "ref-1" {
+			sawSent = true
+		}
+		if it.Status == "failed" {
+			sawFailed = true
+		}
+	}
+	if !sawSent {
+		t.Error("sent row with provider/provider_ref not surfaced")
+	}
+	if !sawFailed {
+		t.Error("failed row not surfaced — admin would never see delivery problems")
+	}
+}
+
 // TestMyInbox_PhoneAlsoMatches: a citizen with phone but no email
 // (or whose notifications went via SMS) sees them in the inbox too.
 func TestMyInbox_PhoneAlsoMatches(t *testing.T) {
