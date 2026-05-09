@@ -190,6 +190,47 @@ for i in $(seq 1 20); do
   sleep 0.3
 done
 
+# ─── 5b. ANPR alert path: scanning a flagged vehicle raises an audit_alert ──
+# Seeds a stolen vehicle, scans it, and waits for the audit-anpr-alerts
+# consumer to materialize an audit_alerts row. Hardens the chain
+# anpr.alert event → event_outbox → consumer → audit_alerts → /audit UI.
+echo "→ ANPR alert: seed a stolen vehicle and scan its plate"
+ALERT_PLATE="STOLEN-$(date +%s)"
+PGPASSWORD=naditos psql -h localhost -U naditos -d naditos >/dev/null 2>&1 -c \
+  "INSERT INTO vehicles (tenant_id, plate, is_stolen)
+        VALUES ('$TENANT', '$ALERT_PLATE', true);"
+ALERT_VID=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+  "SELECT id FROM vehicles WHERE tenant_id='$TENANT' AND plate='$ALERT_PLATE';" | tr -d ' ')
+echo "  vehicle: $ALERT_VID"
+
+ALERT_T0=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
+            "SELECT EXTRACT(EPOCH FROM now())::bigint;" | tr -d ' ')
+
+curl -sS -o /dev/null -X POST http://localhost:8008/v1/anpr/scans "${H_TENANT[@]}" "${H_JSON[@]}" \
+  -H "Authorization: Bearer $OFFICER_TOKEN" \
+  -d "{\"plate\":\"$ALERT_PLATE\",\"confidence\":0.96,\"source\":\"officer\",
+       \"geo_lat\":60.4,\"geo_lng\":5.32,
+       \"captured_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+
+# Wait for the consumer to drain the outbox into audit_alerts. The
+# consumer ticks every couple of seconds so 30 × 0.5 = 15s is plenty.
+ALERT_COUNT=0
+for i in $(seq 1 30); do
+  ALERT_COUNT=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc "
+SELECT count(*) FROM audit_alerts
+ WHERE tenant_id='$TENANT'
+   AND kind='anpr_match_flagged_vehicle'
+   AND subject_id='$ALERT_VID'
+   AND detected_at >= to_timestamp($ALERT_T0);" 2>/dev/null | tr -d ' ')
+  [ "${ALERT_COUNT:-0}" -ge 1 ] && break
+  sleep 0.5
+done
+[ "${ALERT_COUNT:-0}" -ge 1 ] || {
+  echo "✗ expected anpr_match_flagged_vehicle alert, got $ALERT_COUNT"
+  exit 1
+}
+echo "  ✓ audit_alert raised for flagged vehicle"
+
 # ─── 6. compliance lookup ───────────────────────────────────────────────
 echo "→ officer pulls compliance"
 V=$(curl -sS http://localhost:8002/v1/vehicles/by-plate/"$PLATE" "${H_TENANT[@]}" \

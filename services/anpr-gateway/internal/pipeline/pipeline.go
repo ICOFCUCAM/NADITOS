@@ -201,36 +201,46 @@ func (w *Worker) process(ctx context.Context, jobID uuid.UUID, tenant, source st
 		jobID, endStatus, plate, scanID); err != nil {
 		return err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
 
-	// Emit events.
+	// Emit events through the outbox INSIDE the same tx as the scan
+	// write. The relay drains event_outbox into the in-process bus, so
+	// in-process subscribers still see the events; cross-process
+	// consumers (audit-anpr-alerts, future analytics) read directly
+	// from the outbox so they never miss an event a bus-only publish
+	// would have lost on restart.
 	matched := ""
 	if vehicleID != nil {
 		matched = vehicleID.String()
 	}
-	scan := events.NewEnvelope("anpr-gateway", tenant, events.TypeAnprScan, 1,
+	scanEnv := events.NewEnvelope("anpr-gateway", tenant, events.TypeAnprScan, 1,
 		events.AnprScanPayload{
 			ScanID: scanID.String(), Plate: plate, Confidence: conf,
 			Source: source, GeoLat: lat, GeoLng: lng, MatchedVehicleID: matched,
 		})
-	_ = w.bus.Publish(ctx, scan)
+	if err := events.WriteOutbox(ctx, tx, scanEnv); err != nil {
+		return err
+	}
 	if vehicleID != nil {
-		_ = w.bus.Publish(ctx, events.NewEnvelope("anpr-gateway", tenant, events.TypeAnprMatched, 1,
+		matchedEnv := events.NewEnvelope("anpr-gateway", tenant, events.TypeAnprMatched, 1,
 			events.AnprScanPayload{
 				ScanID: scanID.String(), Plate: plate, Confidence: conf,
 				Source: source, GeoLat: lat, GeoLng: lng, MatchedVehicleID: matched,
-			}))
+			})
+		if err := events.WriteOutbox(ctx, tx, matchedEnv); err != nil {
+			return err
+		}
 		if stolen || seized || wanted {
-			_ = w.bus.Publish(ctx, events.NewEnvelope("anpr-gateway", tenant, events.TypeAnprAlert, 1,
+			alertEnv := events.NewEnvelope("anpr-gateway", tenant, events.TypeAnprAlert, 1,
 				events.AnprAlertPayload{
 					ScanID: scanID.String(), Plate: plate, VehicleID: matched,
 					IsStolen: stolen, IsSeized: seized, IsWanted: wanted,
-				}))
+				})
+			if err := events.WriteOutbox(ctx, tx, alertEnv); err != nil {
+				return err
+			}
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (w *Worker) fail(ctx context.Context, jobID uuid.UUID, attempts int, processErr error) {
