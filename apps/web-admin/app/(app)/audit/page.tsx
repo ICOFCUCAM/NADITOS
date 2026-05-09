@@ -24,6 +24,7 @@ type Alert = {
   severity?: number | null;
   details: Record<string, unknown>;
   detected_at: string;
+  resolved_at?: string | null;
 };
 
 const ALERT_LABELS: Record<string, string> = {
@@ -36,14 +37,18 @@ export default function AuditPage() {
   const [items, setItems] = useState<Event[]>([]);
   const [verify, setVerify] = useState<{ ok: boolean; checked: number } | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [showResolved, setShowResolved] = useState(false);
 
   const loadAlerts = useCallback(async () => {
     if (!session) return;
-    const r = await services.audit(`/v1/audit/alerts`, {
+    const path = showResolved
+      ? `/v1/audit/alerts?include_resolved=1`
+      : `/v1/audit/alerts`;
+    const r = await services.audit(path, {
       token: session.accessToken, tenant: session.user.tenant,
     });
     setAlerts((r as any).items ?? []);
-  }, [session]);
+  }, [session, showResolved]);
 
   useEffect(() => {
     if (!session) return;
@@ -87,12 +92,26 @@ export default function AuditPage() {
             : <Pill tone="red">Chain broken at event #{(verify as any).broken_at}</Pill>}
         </Card>
       )}
-      {alerts.length > 0 && (
-        <Card className="p-0 overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-            <div className="font-semibold">Open anomaly alerts</div>
-            <Pill tone="red">{alerts.length}</Pill>
+      <Card className="p-0 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+          <div className="font-semibold">
+            {showResolved ? "Anomaly alerts (incl. resolved)" : "Open anomaly alerts"}
           </div>
+          <div className="flex items-center gap-3">
+            <Pill tone={showResolved ? "slate" : "red"}>{alerts.length}</Pill>
+            <button
+              onClick={() => setShowResolved((s) => !s)}
+              className="text-xs underline text-slate-700">
+              {showResolved ? "Show open only" : "Include resolved"}
+            </button>
+          </div>
+        </div>
+        {alerts.length === 0 && (
+          <div className="p-6 text-center text-sm text-slate-500">
+            {showResolved ? "No alerts on file." : "No open alerts. Nice."}
+          </div>
+        )}
+        {alerts.length > 0 && (
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-slate-600">
               <tr>
@@ -107,7 +126,7 @@ export default function AuditPage() {
             </thead>
             <tbody>
               {alerts.map((a) => (
-                <tr key={a.id} className="border-t border-slate-100 align-top">
+                <tr key={a.id} className={`border-t border-slate-100 align-top ${a.resolved_at ? "opacity-50" : ""}`}>
                   <td className="p-3 text-xs">{new Date(a.detected_at).toLocaleString()}</td>
                   <td className="p-3">{new Date(a.day).toLocaleDateString()}</td>
                   <td className="p-3">{ALERT_LABELS[a.kind] ?? a.kind}</td>
@@ -119,17 +138,19 @@ export default function AuditPage() {
                   </td>
                   <td className="p-3 font-mono text-xs">{JSON.stringify(a.details)}</td>
                   <td className="p-3 text-right">
-                    <button onClick={() => resolve(a.id)}
-                      className="text-xs rounded bg-slate-900 text-white px-2 py-1 hover:bg-slate-800">
-                      Resolve
-                    </button>
+                    {a.resolved_at
+                      ? <span className="text-xs text-slate-500">resolved</span>
+                      : <button onClick={() => resolve(a.id)}
+                          className="text-xs rounded bg-slate-900 text-white px-2 py-1 hover:bg-slate-800">
+                          Resolve
+                        </button>}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </Card>
-      )}
+        )}
+      </Card>
       <Card className="p-0 overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-slate-600">
