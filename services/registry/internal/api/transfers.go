@@ -26,7 +26,6 @@ package api
 
 import (
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -423,6 +422,3 @@ func isUniqueViolation(err error) bool {
 	return strings.Contains(err.Error(), "23505") ||
 		strings.Contains(err.Error(), "duplicate key")
 }
-
-// quiet json import for any future error-shape helpers.
-var _ = json.Marshal

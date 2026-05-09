@@ -15,7 +15,6 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/icofcucam/naditos/packages/go-common/events"
@@ -102,7 +101,3 @@ func decodeData(raw any, out any) error {
 	}
 	return json.Unmarshal(body, out)
 }
-
-// Suppress unused-import warning for pgx — keeps the package self-
-// contained should we later add a tx-bound variant.
-var _ pgx.Tx = (pgx.Tx)(nil)
