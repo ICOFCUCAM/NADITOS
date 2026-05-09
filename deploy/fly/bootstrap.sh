@@ -111,6 +111,79 @@ app_exists() {
   echo "$APPS_JSON" | grep -q "\"Name\"[[:space:]]*:[[:space:]]*\"$1\""
 }
 
+# ─── Postgres pre-flight ───────────────────────────────────────────
+# `fly postgres attach` returns "no active leader found" if the PG
+# cluster's primary isn't in `started` state. On hobby plans Fly
+# auto-stops idle machines, so the most common cause is just that
+# nothing has woken the cluster yet. Wake it once, here, instead of
+# letting every service fail with the same opaque error.
+preflight_postgres() {
+  if ! app_exists "$PG_APP"; then
+    echo "FATAL: postgres app '$PG_APP' does not exist." >&2
+    echo "       run the prereq from deploy/fly/README.md:" >&2
+    echo "         fly postgres create --name $PG_APP --org $ORG --region $REGION" >&2
+    return 1
+  fi
+
+  local machines_json
+  machines_json="$(fly machine list --app "$PG_APP" --json 2>/dev/null || echo '[]')"
+
+  # Count machines by state. We only care: is there at least one started?
+  local total started stopped
+  total=$(echo "$machines_json"   | grep -c '"id"'                || true)
+  started=$(echo "$machines_json" | grep -c '"state"[[:space:]]*:[[:space:]]*"started"' || true)
+  stopped=$(echo "$machines_json" | grep -c '"state"[[:space:]]*:[[:space:]]*"stopped"' || true)
+
+  if [ "$total" -eq 0 ]; then
+    echo "FATAL: $PG_APP has zero machines — cluster was never provisioned." >&2
+    echo "       run: fly postgres create --name $PG_APP --org $ORG --region $REGION" >&2
+    return 1
+  fi
+
+  if [ "$started" -ge 1 ]; then
+    echo "  ✓ $PG_APP has $started/$total machine(s) started"
+    return 0
+  fi
+
+  echo "  → $PG_APP machines are all stopped — starting them"
+  # Extract machine ids from the json. Cheap parse: lines like  "id": "abc123",
+  local ids
+  ids=$(echo "$machines_json" \
+        | grep '"id"[[:space:]]*:' \
+        | head -n "$total" \
+        | sed -E 's/.*"id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+
+  for id in $ids; do
+    fly machine start "$id" --app "$PG_APP" >/dev/null 2>&1 || true
+  done
+
+  # Leader election takes a few seconds after the machine reports started.
+  echo "  → waiting up to 90s for a leader…"
+  local waited=0
+  while [ $waited -lt 90 ]; do
+    sleep 5
+    waited=$((waited + 5))
+    machines_json="$(fly machine list --app "$PG_APP" --json 2>/dev/null || echo '[]')"
+    started=$(echo "$machines_json" | grep -c '"state"[[:space:]]*:[[:space:]]*"started"' || true)
+    if [ "$started" -ge 1 ]; then
+      # Give Stolon another beat to elect.
+      sleep 10
+      echo "  ✓ $PG_APP machine(s) started after ${waited}s"
+      return 0
+    fi
+  done
+
+  echo "FATAL: $PG_APP has no started machines after 90s." >&2
+  echo "       check: fly status -a $PG_APP" >&2
+  echo "              fly logs   -a $PG_APP --no-tail | tail -50" >&2
+  return 1
+}
+
+echo "→ checking $PG_APP health…"
+if ! preflight_postgres; then
+  exit 4
+fi
+
 secret_set() {
   local app="$1" name="$2"
   fly secrets list --app "$app" --json 2>/dev/null \

@@ -134,6 +134,35 @@ The gateway echoes any `Origin` header (see
 Vercel domains work without backend config changes. If you tighten
 this later, add the Vercel deployment URLs to an allow-list there.
 
+## "Error: no active leader found"
+
+Every service fails on the `attaching naditos-pg` step with
+`Error: no active leader found`. Cause: the Postgres cluster has no
+machine in `started` state, so there's no Stolon leader for
+`fly postgres attach` to talk to. On hobby plans this is almost
+always **idle auto-stop** — Fly suspends the PG VMs after inactivity.
+
+`bootstrap.sh` now does a Postgres pre-flight on every run: it
+auto-starts any stopped machines and waits up to 90s for a leader
+before touching the services. If that pre-flight fails, investigate
+directly:
+
+```bash
+fly status       -a naditos-pg
+fly machine list -a naditos-pg
+fly logs         -a naditos-pg --no-tail | tail -50
+```
+
+Common outcomes:
+
+* **Zero machines listed** → the `fly postgres create` prereq never
+  completed. Re-run it.
+* **Machines `stopped`** → `fly machine start <id> -a naditos-pg`,
+  wait ~30s, re-run bootstrap. (The pre-flight should handle this
+  automatically; do it by hand only if it didn't.)
+* **Machines `started` but logs show Postgres crashing** → likely a
+  volume / WAL issue; check `fly logs` for the specific error.
+
 ## Health & logs
 
 ```bash
