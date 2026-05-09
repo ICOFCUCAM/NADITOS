@@ -31,6 +31,23 @@ func RoutesFromEnv() []Route {
 		{Prefix: "/v1/auth/me",       Upstream: auth, NeedsAuth: true},
 		{Prefix: "/v1/admin/users",   Upstream: auth, NeedsAuth: true, NeedsRole: "admin"},
 
+		// Provider webhooks are signature-authenticated, never JWT — and
+		// providers won't send us a tenant header. Match BEFORE the
+		// authenticated /v1/fines route so the gateway doesn't reject
+		// them at the JWT gate.
+		{Prefix: "/v1/fines/payments/webhooks/", Upstream: fines, NeedsAuth: false, RateLimit: 600},
+
+		// Citizen self-service. Each /v1/citizens/me/* path is owned by
+		// a different upstream; longer-specific prefixes must come
+		// first because routing is first-match-wins.
+		{Prefix: "/v1/citizens/me/license",   Upstream: license,  NeedsAuth: true},
+		{Prefix: "/v1/citizens/me/owner",     Upstream: registry, NeedsAuth: true},
+		{Prefix: "/v1/citizens/me/vehicles",  Upstream: registry, NeedsAuth: true},
+		{Prefix: "/v1/citizens/me/transfers", Upstream: registry, NeedsAuth: true},
+
+		// Owners (admin) live in registry alongside vehicles.
+		{Prefix: "/v1/owners",        Upstream: registry, NeedsAuth: true, NeedsRole: "admin"},
+
 		{Prefix: "/v1/vehicles",      Upstream: registry, NeedsAuth: true, RateLimit: 600},
 		{Prefix: "/v1/fines",         Upstream: fines,    NeedsAuth: true, RateLimit: 600},
 		{Prefix: "/v1/audit",         Upstream: audit,    NeedsAuth: true, NeedsRole: "admin"},
