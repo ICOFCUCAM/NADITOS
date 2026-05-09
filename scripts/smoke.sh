@@ -70,6 +70,8 @@ start audit         8007 services/audit
 start auth          8001 services/auth
 start registry      8002 services/registry
 start license       8003 services/license
+start insurance     8004 services/insurance
+start inspection    8005 services/inspection
 start fines         8006 services/fines
 start anpr-gateway  8008 services/anpr-gateway
 start notifications 8009 services/notifications
@@ -94,6 +96,8 @@ wait_health 8002 registry
 wait_health 8006 fines
 wait_health 8007 audit
 wait_health 8003 license
+wait_health 8004 insurance
+wait_health 8005 inspection
 wait_health 8008 anpr-gateway
 wait_health 8009 notifications
 
@@ -230,6 +234,36 @@ done
   exit 1
 }
 echo "  ✓ audit_alert raised for flagged vehicle"
+
+# ─── 5c. insurance + inspection live verify ────────────────────────────
+# Each module's verify endpoint hits the dev-stub provider via the
+# country router, records OK on the per-tenant HealthMonitor, and
+# returns a stable shape. Asserts the path { router → adapter →
+# health monitor → response } works for both services.
+echo "→ insurance verify"
+INS=$(curl -sS "http://localhost:8004/v1/insurance/verify?plate=$PLATE" \
+       "${H_TENANT[@]}" -H "Authorization: Bearer $OFFICER_TOKEN")
+INS_PROVIDER=$(echo "$INS" | jq -r .provider)
+[ "$INS_PROVIDER" = "dev-stub" ] || { echo "✗ insurance verify: $INS"; exit 1; }
+echo "  ✓ insurance provider=$INS_PROVIDER"
+
+echo "→ inspection verify"
+INSP=$(curl -sS "http://localhost:8005/v1/inspection/verify?plate=$PLATE" \
+        "${H_TENANT[@]}" -H "Authorization: Bearer $OFFICER_TOKEN")
+INSP_PROVIDER=$(echo "$INSP" | jq -r .provider)
+[ "$INSP_PROVIDER" = "dev-stub" ] || { echo "✗ inspection verify: $INSP"; exit 1; }
+echo "  ✓ inspection provider=$INSP_PROVIDER"
+
+echo "→ insurance + inspection health"
+INS_H=$(curl -sS "http://localhost:8004/v1/insurance/health" \
+         "${H_TENANT[@]}" -H "Authorization: Bearer $OFFICER_TOKEN")
+INS_STATE=$(echo "$INS_H" | jq -r .state)
+[ "$INS_STATE" = "ok" ] || { echo "✗ insurance health: $INS_H"; exit 1; }
+INSP_H=$(curl -sS "http://localhost:8005/v1/inspection/health" \
+          "${H_TENANT[@]}" -H "Authorization: Bearer $OFFICER_TOKEN")
+INSP_STATE=$(echo "$INSP_H" | jq -r .state)
+[ "$INSP_STATE" = "ok" ] || { echo "✗ inspection health: $INSP_H"; exit 1; }
+echo "  ✓ insurance state=$INS_STATE, inspection state=$INSP_STATE"
 
 # ─── 6. compliance lookup ───────────────────────────────────────────────
 echo "→ officer pulls compliance"
