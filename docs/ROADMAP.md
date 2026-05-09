@@ -13,27 +13,34 @@
 - [x] Docker compose for local dev
 - [x] K8s manifests + Vercel config
 - [x] Driver license module — full lifecycle, demerit engine, QR/NFC verify
-- [x] Insurance verification module — provider router + retry queue + health monitor
-- [x] Roadworthiness module — same connector framework
-- [x] ANPR gateway — async pipeline with normalization, dedup, event emission
+- [x] Insurance verification module — provider router + retry queue + health monitor + worker persists policy
+- [x] Roadworthiness module — same connector framework + worker persists record
+- [x] ANPR gateway — async pipeline with outbox-routed event emission
 - [x] Country regulation packs — versioned manifest + hot-reloading loader
 - [x] Provider connector framework — retry queue, health monitor, country router
-- [x] Domain event bus — InProc + NATS-shaped transport + DB outbox relay
+- [x] Domain event bus — InProc + outbox + relay + cross-process consumers
 - [x] OpenAPI 3.1 spec for the gateway
-- [x] Observability — request id, structured logs, metrics endpoint
-- [ ] Notifications (scaffold ready)
+- [x] Observability — request id, structured logs, /metrics
+- [x] Notifications — consumer drains event_outbox; 7 renderers; citizen inbox
+- [x] Vehicle ownership transfer (citizen → citizen) with code + 7-day expiry
+- [x] Audit anomaly detection — z-score + cancel-rate detectors → audit_alerts
+- [x] ANPR alerts → audit_alerts (stolen / seized / wanted vehicle scans)
+- [x] Evidence retention reaper — sealed_at + storage delete + audit custody
+- [x] Payment webhook with signature verification + idempotent paid transition
+- [x] Race-detector + govulncheck in CI; full-package test coverage
 
 ## Phase 2 — production hardening
 
-- [ ] Real ANPR engine (OpenALPR / PlateRecognizer / custom CV)
-- [ ] Payment gateway (Stripe + local providers)
-- [ ] SMS / email providers (Twilio / Vonage / sovereign)
-- [ ] Court escalation API
+- [ ] Real ANPR engine (OpenALPR adapter shipped; integrate PlateRecognizer / custom CV)
+- [ ] Payment gateway (Stripe + local providers — webhook surface ready)
+- [ ] SMS / email providers (Twilio / Vonage / sovereign — Sender contract ready)
+- [ ] Court escalation API — Filer contract + dev stub shipped; bind real
 - [ ] Insurance / DVLA-equivalent provider connectors
 - [ ] Fraud / cloned-plate detection ML
-- [ ] Officer anomaly detection ML
+- [ ] Officer anomaly detection ML — z-score + cancel-rate live; richer features still TODO
 - [ ] WebAuthn enrollment + SSO (SAML / OIDC) for agencies
-- [ ] OpenTelemetry full coverage
+- [ ] OpenTelemetry full coverage (request id + structured logs already OTel-shaped)
+- [ ] Real NATS JetStream — current shape is in-process bus + outbox relay
 
 ## Phase 3 — national integrations
 
