@@ -170,6 +170,56 @@ func TestConsumer_FineIssued_SendsNotification(t *testing.T) {
 	}
 }
 
+// TestConsumer_FineCancelled_SendsNotification: when an admin
+// resolves a dispute in the citizen's favour, the fines service
+// emits fine.cancelled with the dispute reason; the consumer
+// renders the "fine cancelled" message addressed to the vehicle's
+// owner.
+func TestConsumer_FineCancelled_SendsNotification(t *testing.T) {
+	env := testkit.Setup(t)
+	vehicleID, email := seedVehicleAndCitizen(t, env)
+
+	// Seed an officer (foreign key target for fines.issued_by) and a
+	// fine row so the renderer's vehicle lookup works.
+	officerID := uuid.New()
+	env.Exec(`INSERT INTO users (id, tenant_id, email, password_hash, full_name)
+	          VALUES ($1, $2, $3, '!', 'Test officer')`,
+		officerID, env.Tenant, "officer-"+officerID.String()[:8]+"@x")
+	fineID := uuid.New()
+	env.Exec(`INSERT INTO fines
+	            (id, tenant_id, vehicle_id, plate, offence_code,
+	             amount, currency, status, due_at, issued_by)
+	          VALUES ($1, $2, $3, 'NOTIF-CXL', 'INS_EXPIRED',
+	                  400, 'EUR', 'cancelled'::fine_status,
+	                  now() + interval '14 days', $4)`,
+		fineID, env.Tenant, vehicleID, officerID)
+
+	sender := &captureSender{}
+	c := consumer.New(env.AdminPool(), captureLogger(t), sender)
+	eid := writeOutbox(t, env, events.Envelope{
+		ID: uuid.NewString(), Type: events.TypeFineCancelled, Version: 1,
+		Source: "fines", TenantID: env.Tenant, OccurredAt: time.Now().UTC(),
+		Data: events.FineCancelledPayload{
+			FineID: fineID.String(),
+			Reason: "dispute upheld: plate misread",
+		},
+	})
+	drainOnce(t, env, c, eid)
+
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.out) != 1 {
+		t.Fatalf("want 1 send, got %d", len(sender.out))
+	}
+	if sender.out[0].To != email {
+		t.Fatalf("recipient: want %s got %s", email, sender.out[0].To)
+	}
+	if !strings.Contains(sender.out[0].Body, "cancelled") ||
+		!strings.Contains(sender.out[0].Body, "plate misread") {
+		t.Fatalf("body missing cancellation reason: %q", sender.out[0].Body)
+	}
+}
+
 // TestConsumer_NoRecipient_Suppressed: a fine.issued event for a
 // vehicle whose owner has no email or phone records the notification
 // as 'suppressed' rather than calling the Sender.

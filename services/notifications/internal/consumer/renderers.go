@@ -32,6 +32,7 @@ type renderer struct {
 var renderers = map[string]renderer{
 	events.TypeFineIssued:          fineIssuedRenderer,
 	events.TypeFinePaid:            finePaidRenderer,
+	events.TypeFineCancelled:       fineCancelledRenderer,
 	events.TypeFineEscalated:       fineEscalatedRenderer,
 	events.TypeLicenseSuspended:    licenseSuspendedRenderer,
 	events.TypeLicenseReinstated:   licenseReinstatedRenderer,
@@ -173,6 +174,39 @@ var licenseSuspendedRenderer = renderer{
 				"Until: %s\n\n"+
 				"NADITOS",
 			r.Name, p.Reason, p.StartsAt, p.EndsAt)
+		return subject, body
+	},
+}
+
+// fineCancelledRenderer notifies the citizen when an admin cancels a
+// fine — most often after a successful dispute. Reuses the
+// resolveByVehicle path because a cancelled fine is still attached to
+// the original vehicle/owner and the payload doesn't carry a direct
+// recipient.
+var fineCancelledRenderer = renderer{
+	template: "fine.cancelled.v1",
+	resolve: func(ctx context.Context, tx pgx.Tx, env events.Envelope) (*recipient, error) {
+		var p events.FineCancelledPayload
+		if err := decodeData(env.Data, &p); err != nil {
+			return nil, err
+		}
+		var vehicleID string
+		_ = tx.QueryRow(ctx,
+			`SELECT COALESCE(vehicle_id::text, '') FROM fines
+			  WHERE id=$1 AND tenant_id=$2`, p.FineID, env.TenantID).Scan(&vehicleID)
+		return resolveByVehicle(ctx, tx, env.TenantID, vehicleID)
+	},
+	render: func(env events.Envelope, r *recipient) (string, string) {
+		var p events.FineCancelledPayload
+		_ = decodeData(env.Data, &p)
+		subject := "Fine cancelled"
+		body := fmt.Sprintf(
+			"Hello %s,\n\n"+
+				"A traffic fine on your vehicle has been cancelled.\n"+
+				"Reason: %s\n\n"+
+				"You no longer owe this amount and no demerit points apply.\n\n"+
+				"NADITOS",
+			r.Name, p.Reason)
 		return subject, body
 	},
 }
