@@ -86,6 +86,30 @@ fly deploy --config deploy/fly/fly.gateway.toml --app naditos-gateway --remote-o
 `--remote-only` runs the build on Fly's builder, so you don't need a
 local Docker daemon.
 
+If `bootstrap.sh` failed partway through, **re-run it as-is**: it
+detects existing apps, attached Postgres, and staged secrets, and
+only does the work that's still needed. To target a single failed
+service, pass it as the second argument:
+
+```bash
+bash deploy/fly/bootstrap.sh "$JWT_SECRET" registry
+```
+
+## Dockerfile path quirk
+
+Fly resolves the `[build] dockerfile` path in `fly.toml` **relative
+to the fly.toml file's directory**, not your working directory.
+Every `fly.<service>.toml` here references
+`deploy/docker/go-service.Dockerfile`, which Fly therefore looks for
+at `deploy/fly/deploy/docker/go-service.Dockerfile`. The canonical
+copy lives at `deploy/docker/go-service.Dockerfile` (the same one
+`docker-compose.yml` uses).
+
+`bootstrap.sh` mirrors the canonical Dockerfile to the
+Fly-expected path on first run (symlink preferred, copy fallback)
+so you don't have to think about it. The mirrored file is gitignored
+to avoid drift.
+
 ## Migrations
 
 Migrations live in `db/migrations/` and are applied with

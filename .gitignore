@@ -46,3 +46,8 @@ coverage/
 
 # Docker volumes
 .docker-data/
+
+# Fly.io: bootstrap.sh mirrors deploy/docker/go-service.Dockerfile
+# here on first run because Fly resolves [build] dockerfile relative
+# to the fly.toml directory. Local-only, never commit.
+deploy/fly/deploy/
