@@ -1,0 +1,31 @@
+app = "naditos-fines"
+primary_region = "fra"
+
+[build]
+  dockerfile = "deploy/docker/go-service.Dockerfile"
+  [build.args]
+    SERVICE = "fines"
+
+[env]
+  SERVICE_PORT = "8006"
+  LOG_LEVEL    = "info"
+  AUDIT_URL    = "http://naditos-audit.internal:8007"
+
+[[services]]
+  internal_port = 8006
+  protocol = "tcp"
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  [[services.ports]]
+    port = 8006
+  [[services.http_checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

@@ -1,0 +1,44 @@
+# Public NADITOS gateway. Reverse-proxies into the internal services.
+#
+# Port mapping:
+#   Public 443 (TLS)  ──►  Internal 8080 (gateway)
+#
+# Run from repo root:
+#   fly deploy --config deploy/fly/fly.gateway.toml --app naditos-gateway --remote-only
+app = "naditos-gateway"
+primary_region = "fra"
+
+[build]
+  dockerfile = "deploy/docker/go-service.Dockerfile"
+  [build.args]
+    SERVICE = "gateway"
+
+[env]
+  SERVICE_PORT     = "8080"
+  LOG_LEVEL        = "info"
+  AUTH_URL         = "http://naditos-auth.internal:8001"
+  REGISTRY_URL     = "http://naditos-registry.internal:8002"
+  LICENSE_URL      = "http://naditos-license.internal:8003"
+  INSURANCE_URL    = "http://naditos-insurance.internal:8004"
+  INSPECTION_URL   = "http://naditos-inspection.internal:8005"
+  FINES_URL        = "http://naditos-fines.internal:8006"
+  AUDIT_URL        = "http://naditos-audit.internal:8007"
+  ANPR_URL         = "http://naditos-anpr-gateway.internal:8008"
+  NOTIFICATIONS_URL= "http://naditos-notifications.internal:8009"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

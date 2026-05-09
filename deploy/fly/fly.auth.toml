@@ -1,0 +1,33 @@
+# Internal NADITOS auth service. No public ports — only reachable via
+# Fly 6PN private networking from naditos-gateway.
+app = "naditos-auth"
+primary_region = "fra"
+
+[build]
+  dockerfile = "deploy/docker/go-service.Dockerfile"
+  [build.args]
+    SERVICE = "auth"
+
+[env]
+  SERVICE_PORT = "8001"
+  LOG_LEVEL    = "info"
+
+# Internal-only: bind to the 6PN private IP, no public endpoint.
+[[services]]
+  internal_port = 8001
+  protocol = "tcp"
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  [[services.ports]]
+    port = 8001
+  [[services.http_checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

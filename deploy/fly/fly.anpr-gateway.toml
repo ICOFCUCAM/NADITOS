@@ -1,0 +1,30 @@
+app = "naditos-anpr-gateway"
+primary_region = "fra"
+
+[build]
+  dockerfile = "deploy/docker/go-service.Dockerfile"
+  [build.args]
+    SERVICE = "anpr-gateway"
+
+[env]
+  SERVICE_PORT = "8008"
+  LOG_LEVEL    = "info"
+
+[[services]]
+  internal_port = 8008
+  protocol = "tcp"
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  [[services.ports]]
+    port = 8008
+  [[services.http_checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
