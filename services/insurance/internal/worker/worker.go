@@ -5,9 +5,11 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/icofcucam/naditos/packages/go-common/connectors"
@@ -83,12 +85,63 @@ func (w *Worker) run(ctx context.Context, job *connectors.Job) error {
 			return err
 		}
 		_ = w.health.OK(ctx, job.TenantID, info.Module, info.Provider, info.Region, nil)
-		// Phase-2: persist policy + emit insurance.expired/renewed events.
-		_ = policy
+		// Persist the policy + update the vehicle's insurance_expires_at
+		// so the next compliance lookup reflects the fresh data without
+		// re-verifying. nil policy → no record on file (vehicle is
+		// uninsured per the bureau); leave the row alone.
+		if policy != nil {
+			if err := w.persistPolicy(ctx, job.TenantID, p.Plate, policy); err != nil {
+				w.log.Warn("insurance: persist failed",
+					slog.String("plate", p.Plate),
+					slog.String("err", err.Error()))
+				return err
+			}
+		}
 		return nil
 	default:
 		// Unknown kind — DLQ it after backoff.
 		w.log.Warn("insurance: unknown job kind", "kind", job.Kind)
 		return nil
 	}
+}
+
+// persistPolicy writes the insurance_records row and updates
+// vehicles.insurance_expires_at atomically. Plate not in our registry
+// is silently skipped — the bureau answered for a plate we don't track.
+func (w *Worker) persistPolicy(ctx context.Context, tenant, plate string, p *insurance.Policy) error {
+	conn, err := w.pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var vid string
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM vehicles WHERE tenant_id=$1 AND plate=$2`,
+		tenant, plate).Scan(&vid); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return tx.Commit(ctx) // unknown plate; not an error
+		}
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO insurance_records
+		   (tenant_id, vehicle_id, provider, policy_number,
+		    starts_at, expires_at, is_active)
+		 VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)`,
+		tenant, vid, p.Provider, p.PolicyNumber,
+		p.StartsAt, p.ExpiresAt, p.IsActive); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE vehicles SET insurance_expires_at=$2 WHERE id=$1::uuid`,
+		vid, p.ExpiresAt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
