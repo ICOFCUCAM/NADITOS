@@ -17,6 +17,7 @@
 //   - Escalation stage label so citizens see how serious it is
 //   - Dispute opens a small reason form inline; pay is one-click
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Card, Pill, services, useSession, Button } from "@naditos/web-common";
 
@@ -106,7 +107,9 @@ export default function MyFinesPage() {
       <Card key={f.id}>
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1">
-            <div className="font-mono text-lg">{f.plate}</div>
+            <Link href={`/fines/${f.id}`} className="font-mono text-lg hover:underline">
+              {f.plate}
+            </Link>
             <div className="text-sm text-slate-600">{f.offence_code}</div>
             <div className="text-base font-semibold">{f.amount} {f.currency}</div>
             <div className="text-xs text-slate-500">

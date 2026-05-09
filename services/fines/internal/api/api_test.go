@@ -743,6 +743,54 @@ func TestDispute_ClosedFinesRejected(t *testing.T) {
 	}
 }
 
+// TestGet_OwnerCanRead_NonOwner403: the citizen who owns the
+// vehicle/fine sees full details (evidence, custody) on
+// GET /v1/fines/{id} without holding fines:read; an unrelated
+// citizen with the same JWT shape gets 403.
+func TestGet_OwnerCanRead_NonOwner403(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	officerTok, _ := env.Token("officer", "fines:create")
+	ownerTok, ownerID := env.Token("citizen")
+	otherTok, _ := env.Token("citizen") // not linked to the vehicle
+	linkVehicleToCitizen(t, env, plate, ownerID)
+
+	h := build(env)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("issue: %d %s", rec.Code, rec.Body.String())
+	}
+	var issued struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
+
+	// Owner can read.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/fines/"+issued.ID, "", ownerTok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner GET: want 200, got %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"plate":"`+plate+`"`) {
+		t.Fatalf("response missing plate: %s", rec.Body.String())
+	}
+
+	// Unrelated citizen can't.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/fines/"+issued.ID, "", otherTok))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-owner GET: want 403, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Admin with fines:read can.
+	adminTok, _ := env.Token("admin", "fines:read")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/fines/"+issued.ID, "", adminTok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin GET: want 200, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestPaymentsHealth_RecordsOK: a successful pay call against the
 // dev-stub provider must register an OK on the per-tenant
 // HealthMonitor, and GET /v1/fines/payments/health must surface it

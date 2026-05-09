@@ -70,7 +70,11 @@ func New(cfg config.Service, log *slog.Logger, pool, adminPool *pgxpool.Pool,
 	mux.Handle("POST /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:create")(http.HandlerFunc(a.issue))))
 	mux.Handle("GET  /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:read")(http.HandlerFunc(a.list))))
 	mux.Handle("GET  /v1/fines/mine",     issuer.Middleware(http.HandlerFunc(a.listMine)))
-	mux.Handle("GET  /v1/fines/{id}",     issuer.Middleware(auth.RequirePermission("fines:read")(http.HandlerFunc(a.get))))
+	// GET /v1/fines/{id} — admin (fines:read) OR citizen who owns it.
+	// The handler enforces the owner branch internally; perm gate is
+	// applied per-request rather than at the route, so the citizen
+	// path doesn't 403 from the middleware before we can check.
+	mux.Handle("GET  /v1/fines/{id}",     issuer.Middleware(http.HandlerFunc(a.get)))
 	mux.Handle("POST /v1/fines/{id}/pay", issuer.Middleware(http.HandlerFunc(a.handlePay)))
 	mux.Handle("POST /v1/fines/{id}/dispute", issuer.Middleware(http.HandlerFunc(a.dispute)))
 	mux.Handle("POST /v1/fines/{id}/cancel",  issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.cancel))))
@@ -408,6 +412,7 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, httpx.ErrBadRequest)
 		return
 	}
+	c := auth.ClaimsFrom(r.Context())
 	conn, err := db.WithTenant(r.Context(), a.pool)
 	if err != nil {
 		httpx.WriteErr(w, err)
@@ -415,12 +420,19 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Release()
 	var f fineOut
+	var ownerOK string
 	err = conn.QueryRow(r.Context(),
-		`SELECT id, plate, offence_code, amount::text, currency,
-		        status::text, issued_at, due_at, issued_by, escalation_stage
-		   FROM fines WHERE id=$1`, id).
+		`SELECT f.id, f.plate, f.offence_code, f.amount::text, f.currency,
+		        f.status::text, f.issued_at, f.due_at, f.issued_by, f.escalation_stage,
+		        CASE WHEN o.user_id = $2 OR f.driver_user_id = $2
+		             THEN 'yes' ELSE 'no' END
+		   FROM fines f
+		   LEFT JOIN vehicles v ON v.id = f.vehicle_id
+		   LEFT JOIN owners   o ON o.id = v.owner_id
+		  WHERE f.id = $1`, id, c.Subject).
 		Scan(&f.ID, &f.Plate, &f.OffenceCode, &f.Amount, &f.Currency,
-			&f.Status, &f.IssuedAt, &f.DueAt, &f.IssuedBy, &f.EscalationStage)
+			&f.Status, &f.IssuedAt, &f.DueAt, &f.IssuedBy, &f.EscalationStage,
+			&ownerOK)
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.WriteErr(w, httpx.ErrNotFound)
 		return
@@ -428,6 +440,20 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpx.WriteErr(w, err)
 		return
+	}
+	// Authz: admin/court (fines:read) OR the citizen who owns it.
+	if ownerOK != "yes" {
+		hasRead := false
+		for _, p := range c.Permissions {
+			if p == "fines:read" {
+				hasRead = true
+				break
+			}
+		}
+		if !hasRead {
+			httpx.WriteErr(w, httpx.ErrForbidden)
+			return
+		}
 	}
 	rows, _ := conn.Query(r.Context(),
 		`SELECT kind, s3_key, sha256, bytes, taken_at
