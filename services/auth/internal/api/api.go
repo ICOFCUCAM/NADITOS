@@ -4,8 +4,10 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,12 +28,32 @@ type API struct {
 }
 
 func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool) http.Handler {
+	if log == nil {
+		panic("api.New: log is nil")
+	}
+	if pool == nil {
+		log.Error("api.New: pool is nil — would crash at first DB call")
+		panic("api.New: pool is nil")
+	}
+	if cfg.JWTSecret == "" {
+		log.Error("api.New: cfg.JWTSecret is empty — JWT signing would fail")
+		panic("api.New: cfg.JWTSecret is empty")
+	}
+	issuer := auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL)
+	if issuer == nil {
+		log.Error("api.New: auth.NewIssuer returned nil")
+		panic("api.New: issuer is nil")
+	}
 	a := &API{
 		cfg:    cfg,
 		log:    log,
 		pool:   pool,
-		issuer: auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL),
+		issuer: issuer,
 	}
+	log.Info("api.New: wired",
+		slog.Int("jwt_secret_len", len(cfg.JWTSecret)),
+		slog.String("default_tenant", cfg.DefaultTenant),
+	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/auth/login",   a.handleLogin)
 	mux.HandleFunc("POST /v1/auth/refresh", a.handleRefresh)
@@ -66,6 +88,31 @@ type meResp struct {
 func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rid, _, _ := observability.IDs(ctx)
+
+	// Flight-recorder line: written directly to stderr so it survives
+	// any slog-level filtering and any panic that happens before the
+	// first slog call. If you don't see this line for a request that
+	// reaches /v1/auth/login, the binary is not built from this source.
+	fmt.Fprintf(os.Stderr, "LOGIN_HANDLER_ENTERED rid=%s ct=%q ua=%q\n",
+		rid, r.Header.Get("Content-Type"), r.Header.Get("User-Agent"))
+
+	if a == nil {
+		fmt.Fprintln(os.Stderr, "LOGIN_FATAL a==nil")
+		http.Error(w, `{"code":"internal","message":"nil receiver"}`, http.StatusInternalServerError)
+		return
+	}
+	if a.pool == nil {
+		fmt.Fprintln(os.Stderr, "LOGIN_FATAL a.pool==nil")
+		a.log.Error("login: pool is nil", slog.String("rid", rid))
+		http.Error(w, `{"code":"internal","message":"nil pool"}`, http.StatusInternalServerError)
+		return
+	}
+	if a.issuer == nil {
+		fmt.Fprintln(os.Stderr, "LOGIN_FATAL a.issuer==nil")
+		a.log.Error("login: issuer is nil", slog.String("rid", rid))
+		http.Error(w, `{"code":"internal","message":"nil issuer"}`, http.StatusInternalServerError)
+		return
+	}
 
 	var req loginReq
 	if err := httpx.ReadJSON(r, &req); err != nil {
