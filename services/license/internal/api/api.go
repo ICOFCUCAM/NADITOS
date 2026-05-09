@@ -57,6 +57,8 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	// Suspensions
 	mux.Handle("POST /v1/licenses/{id}/suspensions",
 		issuer.Middleware(auth.RequirePermission("license:write")(http.HandlerFunc(a.addSuspension))))
+	mux.Handle("GET  /v1/licenses/{id}/suspensions/active",
+		issuer.Middleware(auth.RequirePermission("license:read")(http.HandlerFunc(a.activeSuspension))))
 	mux.Handle("POST /v1/licenses/{id}/suspensions/{sid}/lift",
 		issuer.Middleware(auth.RequirePermission("license:write")(http.HandlerFunc(a.liftSuspension))))
 
@@ -332,6 +334,52 @@ func (a *API) addSuspension(w http.ResponseWriter, r *http.Request) {
 
 	_ = a.audit.Emit(r.Context(), "license.suspend", "driver_license", id.String(), nil, in)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": sid.String()})
+}
+
+// activeSuspension returns the currently-active suspension for a
+// license (lifted_at IS NULL AND ends_at > now()), or 404 if there
+// isn't one. The admin UI needs the suspension id to call lift; this
+// endpoint saves it from having to know how to query the DB.
+func (a *API) activeSuspension(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteErr(w, httpx.ErrBadRequest)
+		return
+	}
+	conn, err := db.WithTenant(r.Context(), a.pool)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer conn.Release()
+	var (
+		sid          uuid.UUID
+		reason       string
+		startsAt     time.Time
+		endsAt       time.Time
+		triggerKind  string
+	)
+	err = conn.QueryRow(r.Context(),
+		`SELECT id, reason, starts_at, ends_at, COALESCE(trigger_kind,'')
+		   FROM driver_suspensions
+		  WHERE license_id=$1 AND lifted_at IS NULL AND ends_at > now()
+		  ORDER BY starts_at DESC LIMIT 1`, id).
+		Scan(&sid, &reason, &startsAt, &endsAt, &triggerKind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.WriteErr(w, httpx.ErrNotFound)
+		return
+	}
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"id":           sid.String(),
+		"reason":       reason,
+		"starts_at":    startsAt,
+		"ends_at":      endsAt,
+		"trigger_kind": triggerKind,
+	})
 }
 
 func (a *API) liftSuspension(w http.ResponseWriter, r *http.Request) {

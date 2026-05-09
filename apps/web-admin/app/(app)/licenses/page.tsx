@@ -110,8 +110,32 @@ export default function LicensesPage() {
               Recent violations (24m): <span className="font-medium">{result.recent_violations}</span>
             </div>
             {result.license.is_suspended && (
-              <div className="mt-3 rounded bg-slate-900 text-white p-3 text-sm">
-                Suspended {result.license.suspended_until && `until ${result.license.suspended_until}`}
+              <div className="mt-3 rounded bg-slate-900 text-white p-3 text-sm space-y-2">
+                <div>
+                  Suspended {result.license.suspended_until && `until ${result.license.suspended_until}`}
+                </div>
+                <Button
+                  onClick={async () => {
+                    if (!session) return;
+                    if (!window.confirm("Lift the active suspension on " + result.license.license_number + "?")) return;
+                    try {
+                      const sid: any = await services.license(
+                        `/v1/licenses/${result.license.id}/suspensions/active`, {
+                        token: session.accessToken, tenant: session.user.tenant,
+                      });
+                      await services.license(
+                        `/v1/licenses/${result.license.id}/suspensions/${sid.id}/lift`, {
+                        method: "POST",
+                        token: session.accessToken, tenant: session.user.tenant,
+                      });
+                      await lookup();
+                    } catch (e: any) {
+                      setErr(e?.message ?? "Lift failed");
+                    }
+                  }}
+                  className="bg-amber-500 hover:bg-amber-600 text-slate-900">
+                  Lift suspension
+                </Button>
               </div>
             )}
           </Card>
