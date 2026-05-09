@@ -1,12 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, Card, Input, Pill, services, useSession } from "@naditos/web-common";
 
 // /v1/citizens/me/owner is idempotent — the same request submitted
-// twice updates the record rather than creating a duplicate. The page
-// always shows the form; if a profile already exists the same submit
-// updates it.
+// twice updates the record rather than creating a duplicate. On mount
+// we fetch the existing record so a citizen who returns to update
+// just one field doesn't have to retype everything else.
 export default function OwnerPage() {
   const { session } = useSession();
   const [fullName, setFullName] = useState(session?.user.full_name ?? "");
@@ -16,6 +16,23 @@ export default function OwnerPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [savedID, setSavedID] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!session) return;
+    services.registry("/v1/citizens/me/owner", {
+      token: session.accessToken, tenant: session.user.tenant,
+    })
+      .then((r: any) => {
+        if (r?.full_name) setFullName(r.full_name);
+        if (r?.email)     setEmail(r.email);
+        if (r?.phone)     setPhone(r.phone);
+        if (r?.national_id) setNationalID(r.national_id);
+        setSavedID(r?.id ?? null);
+      })
+      .catch(() => { /* 404 = no profile yet, keep JWT defaults */ })
+      .finally(() => setLoaded(true));
+  }, [session]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();

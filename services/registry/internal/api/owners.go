@@ -242,6 +242,23 @@ func (a *API) selfClaimOwner(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": id.String()})
 }
 
+// getMyOwner returns the citizen's own owners row so the profile UI
+// can pre-populate. 404 when the citizen hasn't self-claimed yet —
+// that's the signal for the UI to show an empty form.
+func (a *API) getMyOwner(w http.ResponseWriter, r *http.Request) {
+	c := auth.ClaimsFrom(r.Context())
+	conn, err := db.WithTenant(r.Context(), a.pool)
+	if err != nil { httpx.WriteErr(w, err); return }
+	defer conn.Release()
+	o, err := scanOwner(conn.QueryRow(r.Context(),
+		`SELECT `+ownerCols+` FROM owners WHERE user_id=$1::uuid`, c.Subject))
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.WriteErr(w, httpx.ErrNotFound); return
+	}
+	if err != nil { httpx.WriteErr(w, err); return }
+	httpx.WriteJSON(w, http.StatusOK, o)
+}
+
 // myVehicles lists the vehicles owned by the citizen behind the JWT.
 func (a *API) myVehicles(w http.ResponseWriter, r *http.Request) {
 	c := auth.ClaimsFrom(r.Context())

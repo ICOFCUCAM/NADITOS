@@ -122,6 +122,53 @@ func TestOwners_LinkVehicle_Transfer(t *testing.T) {
 }
 
 // ─── Citizen self-claim ────────────────────────────────────────────────────
+// TestOwners_GetMyOwner_RoundTrip: claim → GET returns the same row.
+// Drives the citizen profile UI's pre-populate path. Pre-claim, GET
+// must 404 so the UI can render an empty form instead of waiting on
+// stale state.
+func TestOwners_GetMyOwner_RoundTrip(t *testing.T) {
+	env := testkit.Setup(t)
+	grantOwnersSelf(t, env)
+	tok, _ := env.Token("citizen", "owners:self")
+	h := build(env)
+
+	// Pre-claim → 404.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/citizens/me/owner", "", tok))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("pre-claim GET: want 404, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Claim.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/citizens/me/owner",
+		`{"full_name":"Round Trip","email":"rt@example.com","phone":"+1-555"}`, tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("claim: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// GET returns the same fields.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/citizens/me/owner", "", tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET: %d %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		FullName string  `json:"full_name"`
+		Email    *string `json:"email"`
+		Phone    *string `json:"phone"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.FullName != "Round Trip" {
+		t.Fatalf("full_name: %q", got.FullName)
+	}
+	if got.Email == nil || *got.Email != "rt@example.com" {
+		t.Fatalf("email: %v", got.Email)
+	}
+}
+
 func TestOwners_CitizenSelfClaim_Idempotent(t *testing.T) {
 	env := testkit.Setup(t)
 	grantOwnersSelf(t, env)

@@ -51,6 +51,7 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	// Citizen self-service. The route is gated by 'owners:self' so a
 	// regular browse-only citizen JWT can't claim ownership without it.
 	root.Handle("POST /v1/citizens/me/owner",       issuer.Middleware(auth.RequirePermission("owners:self")(http.HandlerFunc(a.selfClaimOwner))))
+	root.Handle("GET  /v1/citizens/me/owner",       issuer.Middleware(http.HandlerFunc(a.getMyOwner)))
 	root.Handle("GET  /v1/citizens/me/vehicles",    issuer.Middleware(http.HandlerFunc(a.myVehicles)))
 	// Citizen-to-citizen vehicle ownership transfer. The seller starts
 	// the transfer; the buyer accepts with the returned code. Existing
