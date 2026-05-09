@@ -178,11 +178,13 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, l)
 }
 
-// list handles both "search" and "single-lookup" shapes:
+// list handles "search" and "filter" shapes:
 //
 //	GET /v1/licenses?number=DL-12345  → returns the matching license, or 404
+//	GET /v1/licenses?suspended=true   → all currently-suspended licenses
+//	                                    (is_suspended=true), newest-first
 //	GET /v1/licenses                  → reserved for paginated browse
-//	                                    (Phase-3; returns empty list for now)
+//	                                    (Phase-3; returns empty list)
 func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	conn, err := db.WithTenant(r.Context(), a.pool)
 	if err != nil { httpx.WriteErr(w, err); return }
@@ -194,6 +196,20 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 		if writeIfNotFound(w, err) { return }
 		if err != nil { httpx.WriteErr(w, err); return }
 		httpx.WriteJSON(w, http.StatusOK, l)
+		return
+	}
+	if r.URL.Query().Get("suspended") == "true" {
+		rows, err := conn.Query(r.Context(),
+			licenseSelect+`WHERE is_suspended=true ORDER BY suspended_until DESC NULLS LAST LIMIT 200`)
+		if err != nil { httpx.WriteErr(w, err); return }
+		defer rows.Close()
+		out := []license{}
+		for rows.Next() {
+			l, err := scanLicense(rows)
+			if err != nil { httpx.WriteErr(w, err); return }
+			out = append(out, l)
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": []license{}})

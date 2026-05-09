@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Card, Input, Pill, Button, services, useSession } from "@naditos/web-common";
 
 type LicenseStanding = {
@@ -22,6 +22,11 @@ const STANDING_TONES: Record<LicenseStanding["standing"], "green" | "amber" | "r
   suspended: "black",
 };
 
+type SuspendedRow = {
+  id: string; license_number: string; full_name: string;
+  is_suspended: boolean; suspended_until?: string | null;
+};
+
 export default function LicensesPage() {
   const { session } = useSession();
   const [q, setQ] = useState("");
@@ -29,6 +34,18 @@ export default function LicensesPage() {
   const [violations, setViolations] = useState<any[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [suspended, setSuspended] = useState<SuspendedRow[]>([]);
+
+  // Pre-populate the suspended list on mount so admins land on a
+  // useful triage screen without having to know a specific number.
+  useEffect(() => {
+    if (!session) return;
+    services.license("/v1/licenses?suspended=true", {
+      token: session.accessToken, tenant: session.user.tenant,
+    })
+      .then((r: any) => setSuspended(r.items ?? []))
+      .catch(() => {});
+  }, [session]);
 
   async function lookup() {
     if (!session || !q) return;
@@ -78,6 +95,41 @@ export default function LicensesPage() {
         </div>
         {err && <p className="text-sm text-red-600 mt-2">{err}</p>}
       </Card>
+
+      {!result && suspended.length > 0 && (
+        <Card className="p-0 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+            <div className="font-semibold">Active suspensions</div>
+            <Pill tone="red">{suspended.length}</Pill>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-slate-600">
+              <tr>
+                <th className="text-left p-3">Number</th>
+                <th className="text-left p-3">Holder</th>
+                <th className="text-left p-3">Suspended until</th>
+                <th className="p-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {suspended.map((s) => (
+                <tr key={s.id} className="border-t border-slate-100">
+                  <td className="p-3 font-mono">{s.license_number}</td>
+                  <td className="p-3">{s.full_name}</td>
+                  <td className="p-3">{s.suspended_until ?? "—"}</td>
+                  <td className="p-3 text-right">
+                    <button
+                      onClick={() => { setQ(s.license_number); setTimeout(lookup, 0); }}
+                      className="text-xs underline text-slate-700">
+                      Inspect
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
 
       {result && (
         <div className="grid md:grid-cols-2 gap-4">
