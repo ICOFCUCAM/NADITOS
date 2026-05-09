@@ -41,10 +41,11 @@ func RoutesFromEnv() []Route {
 		// a different upstream. The gateway resolves by longest-prefix
 		// match, so specific routes here win against any future
 		// /v1/citizens fallback regardless of declaration order.
-		{Prefix: "/v1/citizens/me/license",   Upstream: license,  NeedsAuth: true},
-		{Prefix: "/v1/citizens/me/owner",     Upstream: registry, NeedsAuth: true},
-		{Prefix: "/v1/citizens/me/vehicles",  Upstream: registry, NeedsAuth: true},
-		{Prefix: "/v1/citizens/me/transfers", Upstream: registry, NeedsAuth: true},
+		{Prefix: "/v1/citizens/me/license",       Upstream: license,  NeedsAuth: true},
+		{Prefix: "/v1/citizens/me/notifications", Upstream: notify,   NeedsAuth: true},
+		{Prefix: "/v1/citizens/me/owner",         Upstream: registry, NeedsAuth: true},
+		{Prefix: "/v1/citizens/me/vehicles",      Upstream: registry, NeedsAuth: true},
+		{Prefix: "/v1/citizens/me/transfers",     Upstream: registry, NeedsAuth: true},
 
 		// Owners (admin) live in registry alongside vehicles.
 		{Prefix: "/v1/owners",        Upstream: registry, NeedsAuth: true, NeedsRole: "admin"},

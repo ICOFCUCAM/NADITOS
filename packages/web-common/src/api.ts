@@ -71,4 +71,5 @@ export const services = {
   anpr:       (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_ANPR_BASE       ?? DEFAULT_BASE }),
   insurance:  (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_INSURANCE_BASE  ?? DEFAULT_BASE }),
   inspection: (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_INSPECTION_BASE ?? DEFAULT_BASE }),
+  notify:     (path: string, opts?: FetchOpts) => apiFetch(path, { ...opts, base: process.env.NEXT_PUBLIC_NOTIFY_BASE     ?? DEFAULT_BASE }),
 };

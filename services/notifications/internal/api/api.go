@@ -37,6 +37,10 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 		issuer.Middleware(http.HandlerFunc(a.notify)))
 	mux.Handle("GET /v1/notify",
 		issuer.Middleware(http.HandlerFunc(a.list)))
+	// Citizen self-service inbox: notifications addressed to me
+	// (recipient matches my email or phone).
+	mux.Handle("GET /v1/citizens/me/notifications",
+		issuer.Middleware(http.HandlerFunc(a.myInbox)))
 	return mux
 }
 
@@ -97,6 +101,58 @@ func (a *API) notify(w http.ResponseWriter, r *http.Request) {
 		"provider":     a.send.Info().Provider,
 		"provider_ref": receipt.ID,
 	})
+}
+
+// GET /v1/citizens/me/notifications — the inbox for the citizen
+// behind the JWT. Recipient strings (email / phone) are matched
+// against users.email and owners.phone for the caller's user_id;
+// only "sent" rows are returned (drafts and suppressed messages
+// are operational state, not user-facing).
+func (a *API) myInbox(w http.ResponseWriter, r *http.Request) {
+	c := auth.ClaimsFrom(r.Context())
+	conn, err := db.WithTenant(r.Context(), a.pool)
+	if err != nil { httpx.WriteErr(w, err); return }
+	defer conn.Release()
+
+	// Look up the caller's known recipient strings. RLS scopes both
+	// users and owners to the tenant.
+	var email, phone string
+	_ = conn.QueryRow(r.Context(),
+		`SELECT COALESCE(u.email::text, ''),
+		        COALESCE(o.phone, u.phone, '')
+		   FROM users u
+		   LEFT JOIN owners o ON o.user_id = u.id
+		  WHERE u.id = $1::uuid`, c.Subject).Scan(&email, &phone)
+
+	rows, err := conn.Query(r.Context(),
+		`SELECT id, channel, recipient, COALESCE(subject,''), template,
+		        status::text, body, created_at, sent_at
+		   FROM notification_records
+		  WHERE status='sent'
+		    AND (recipient = NULLIF($1,'') OR recipient = NULLIF($2,''))
+		  ORDER BY created_at DESC LIMIT 100`, email, phone)
+	if err != nil { httpx.WriteErr(w, err); return }
+	defer rows.Close()
+
+	type item struct {
+		ID        uuid.UUID  `json:"id"`
+		Channel   string     `json:"channel"`
+		Recipient string     `json:"recipient"`
+		Subject   string     `json:"subject"`
+		Template  *string    `json:"template"`
+		Status    string     `json:"status"`
+		Body      string     `json:"body"`
+		CreatedAt time.Time  `json:"created_at"`
+		SentAt    *time.Time `json:"sent_at"`
+	}
+	out := []item{}
+	for rows.Next() {
+		var it item
+		_ = rows.Scan(&it.ID, &it.Channel, &it.Recipient, &it.Subject, &it.Template,
+			&it.Status, &it.Body, &it.CreatedAt, &it.SentAt)
+		out = append(out, it)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
 // GET /v1/notify — recent history for the current tenant.

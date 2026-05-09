@@ -32,6 +32,12 @@ export default function CitizenHome() {
             License standing, demerit points, and suspension history.
           </div>
         </Card></Link>
+        <Link href="/inbox"><Card className="hover:shadow-md transition">
+          <div className="text-lg font-semibold">Notifications</div>
+          <div className="text-sm text-slate-600">
+            Messages we've sent to your registered email or phone.
+          </div>
+        </Card></Link>
         <Link href="/transfers"><Card className="hover:shadow-md transition">
           <div className="text-lg font-semibold">Ownership transfers</div>
           <div className="text-sm text-slate-600">
