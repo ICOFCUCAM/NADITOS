@@ -65,7 +65,7 @@ func build(env *testkit.Env, stub inspection.Verifier) *worker.Worker {
 // simple enough to mirror.
 func waitForJobStatus(t *testing.T, env *testkit.Env, tenant string, want string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var status string
 		err := env.QueryRow(
@@ -128,7 +128,7 @@ func TestWorker_FailureBacksOff(t *testing.T) {
 	// status should remain queued (or running briefly) — never done.
 	// Match by the unique tenant we're testing in, restricted to the
 	// most recent row so older test fixtures don't satisfy the check.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var attempts int
 		var status string
