@@ -10,7 +10,9 @@
     "./session":  "./src/session.tsx",
     "./status":   "./src/status.ts",
     "./i18n":     "./src/i18n.ts",
-    "./ui":       "./src/ui.tsx"
+    "./ui":       "./src/ui.tsx",
+    "./layout":   "./src/layout.tsx",
+    "./tokens.css": "./src/tokens.css"
   },
   "peerDependencies": {
     "react": "^18.3.0",

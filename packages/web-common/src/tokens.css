@@ -1,0 +1,249 @@
+/* NADITOS GovTech design tokens.
+ *
+ * Two surfaces:
+ *   • .nadit-dark   — command-center / officer; primary use case
+ *   • .nadit-light  — citizen-facing; trustworthy, document-feel
+ *
+ * Both share the same semantic-token names so components are
+ * surface-agnostic. Tokens follow the W3C design-tokens shape:
+ * primitive (palette) → semantic (intent) → component-bound stays
+ * inline at the component.
+ *
+ * Colour philosophy:
+ *   • base     — Midnight navy, 9–10 stops, drawn from sovereign blues
+ *   • primary  — Cyan-teal command accent ("ops blue"), AA on dark
+ *   • accent   — Sovereign gold, used sparingly for warrant / official
+ *   • status   — Three-light traffic system (success/warn/danger) +
+ *                a black "alert" rail for stolen / wanted / seized
+ *   • signal   — Pure ink for plate numbers / IDs / cryptographic
+ *                hashes; mono-rendered
+ */
+
+:root {
+  /* — Primitive palette ——————————————————————————————————— */
+  /* Midnight (sovereign navy). 50 lightest → 950 darkest. */
+  --c-mid-50:  #eef2f7;
+  --c-mid-100: #d6deea;
+  --c-mid-200: #aebed5;
+  --c-mid-300: #7e93b3;
+  --c-mid-400: #586e91;
+  --c-mid-500: #3a4f70;
+  --c-mid-600: #2a3b56;
+  --c-mid-700: #1f2c41;
+  --c-mid-800: #15203a;
+  --c-mid-900: #0c1326;
+  --c-mid-950: #060a18;
+
+  /* Ops cyan — command-center primary. */
+  --c-ops-50:  #ecfeff;
+  --c-ops-100: #cffafe;
+  --c-ops-200: #a5f3fc;
+  --c-ops-300: #67e8f9;
+  --c-ops-400: #22d3ee;
+  --c-ops-500: #06b6d4;
+  --c-ops-600: #0891b2;
+  --c-ops-700: #0e7490;
+  --c-ops-800: #155e75;
+  --c-ops-900: #164e63;
+
+  /* Sovereign gold — used sparingly on warrants, decorations, official. */
+  --c-gold-200: #fde68a;
+  --c-gold-300: #fcd34d;
+  --c-gold-400: #f5b800;
+  --c-gold-500: #d99e00;
+  --c-gold-600: #b07c00;
+
+  /* Status: green / amber / red traffic lights. */
+  --c-ok-300:  #6ee7b7;
+  --c-ok-400:  #34d399;
+  --c-ok-500:  #10b981;
+  --c-ok-600:  #059669;
+  --c-warn-300:#fcd34d;
+  --c-warn-400:#fbbf24;
+  --c-warn-500:#f59e0b;
+  --c-warn-600:#d97706;
+  --c-bad-300: #fca5a5;
+  --c-bad-400: #f87171;
+  --c-bad-500: #ef4444;
+  --c-bad-600: #dc2626;
+  --c-bad-700: #b91c1c;
+
+  /* Neutral / paper for light surfaces. */
+  --c-paper-0:   #ffffff;
+  --c-paper-50:  #f8fafc;
+  --c-paper-100: #f1f5f9;
+  --c-paper-200: #e2e8f0;
+  --c-paper-300: #cbd5e1;
+  --c-paper-400: #94a3b8;
+  --c-paper-500: #64748b;
+  --c-paper-600: #475569;
+  --c-paper-700: #334155;
+  --c-paper-800: #1e293b;
+  --c-paper-900: #0f172a;
+
+  /* — Spacing scale (4-pt base) ——————————————————————————— */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px; --s-5: 20px;
+  --s-6: 24px; --s-7: 32px; --s-8: 40px; --s-9: 48px; --s-10: 64px;
+  --s-11: 80px; --s-12: 96px;
+
+  /* — Radii ————————————————————————————————————————————— */
+  --r-xs: 4px;  --r-sm: 6px;  --r-md: 8px;
+  --r-lg: 12px; --r-xl: 16px; --r-2xl: 20px;
+  --r-pill: 999px;
+
+  /* — Type scale (responsive ramp) ——————————————————————— */
+  --t-display: clamp(2rem, 1.5rem + 2vw, 3rem);
+  --t-h1: clamp(1.5rem, 1.2rem + 1vw, 2rem);
+  --t-h2: 1.5rem;
+  --t-h3: 1.25rem;
+  --t-h4: 1.125rem;
+  --t-body: 0.9375rem;     /* 15px — denser than 16 for ops density */
+  --t-caption: 0.8125rem;  /* 13px */
+  --t-micro: 0.6875rem;    /* 11px */
+
+  /* — Font stacks. Self-host adds in the future; system fallbacks today. */
+  --ff-sans: "Inter", "Geist", ui-sans-serif, system-ui, -apple-system,
+             "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --ff-display: "Manrope", "Space Grotesk", var(--ff-sans);
+  --ff-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace,
+             SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* — Motion ————————————————————————————————————————————— */
+  --m-fast: 120ms;
+  --m-base: 180ms;
+  --m-slow: 280ms;
+  --m-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* — Elevation ————————————————————————————————————————— */
+  --e-soft:    0 1px 2px rgba(8, 12, 24, 0.08), 0 1px 3px rgba(8, 12, 24, 0.06);
+  --e-raised:  0 4px 12px rgba(8, 12, 24, 0.12), 0 1px 2px rgba(8, 12, 24, 0.08);
+  --e-floating:0 16px 32px rgba(8, 12, 24, 0.20), 0 4px 8px rgba(8, 12, 24, 0.10);
+}
+
+/* — Dark surface (command-center / officer / admin headers) ———— */
+.nadit-dark {
+  --bg-canvas:    var(--c-mid-950);
+  --bg-surface:   var(--c-mid-900);
+  --bg-elevated:  var(--c-mid-800);
+  --bg-hover:     rgba(34, 211, 238, 0.06);
+  --bg-active:    rgba(34, 211, 238, 0.12);
+  --bg-overlay:   rgba(6, 10, 24, 0.78);
+
+  --border-subtle:  rgba(245, 247, 250, 0.06);
+  --border-default: rgba(245, 247, 250, 0.10);
+  --border-strong:  rgba(245, 247, 250, 0.18);
+
+  --fg-primary:   #f5f7fa;
+  --fg-secondary: #c7d1e0;
+  --fg-muted:     #8a99b3;
+  --fg-disabled:  #58688a;
+  --fg-on-accent: #02151a;
+
+  --accent-primary:    var(--c-ops-400);
+  --accent-primary-fg: #02151a;
+  --accent-strong:     var(--c-ops-300);
+  --accent-soft-bg:    rgba(34, 211, 238, 0.10);
+  --accent-soft-fg:    var(--c-ops-300);
+
+  --gold:        var(--c-gold-400);
+  --gold-soft:   rgba(245, 184, 0, 0.14);
+
+  --status-ok-fg:   var(--c-ok-300);
+  --status-ok-bg:   rgba(16, 185, 129, 0.14);
+  --status-warn-fg: var(--c-warn-300);
+  --status-warn-bg: rgba(245, 158, 11, 0.14);
+  --status-bad-fg:  var(--c-bad-300);
+  --status-bad-bg:  rgba(239, 68, 68, 0.16);
+  --status-alert-fg:#ffffff;
+  --status-alert-bg:#000000;
+
+  --signal-mono-fg: #e5edf7;
+
+  --focus-ring: 0 0 0 2px var(--c-mid-950), 0 0 0 4px var(--c-ops-400);
+  --glow-ops:   0 0 0 1px rgba(34, 211, 238, 0.22), 0 8px 32px rgba(6, 182, 212, 0.20);
+  --glow-bad:   0 0 0 1px rgba(239, 68, 68, 0.30), 0 8px 32px rgba(220, 38, 38, 0.22);
+}
+
+/* — Light surface (citizen-facing, document feel) ——————————————— */
+.nadit-light {
+  --bg-canvas:    var(--c-paper-50);
+  --bg-surface:   #ffffff;
+  --bg-elevated:  #ffffff;
+  --bg-hover:     var(--c-paper-100);
+  --bg-active:    var(--c-paper-200);
+  --bg-overlay:   rgba(15, 23, 42, 0.50);
+
+  --border-subtle:  var(--c-paper-100);
+  --border-default: var(--c-paper-200);
+  --border-strong:  var(--c-paper-300);
+
+  --fg-primary:   var(--c-paper-900);
+  --fg-secondary: var(--c-paper-700);
+  --fg-muted:     var(--c-paper-500);
+  --fg-disabled:  var(--c-paper-400);
+  --fg-on-accent: #ffffff;
+
+  --accent-primary:    var(--c-ops-700);
+  --accent-primary-fg: #ffffff;
+  --accent-strong:     var(--c-ops-800);
+  --accent-soft-bg:    var(--c-ops-50);
+  --accent-soft-fg:    var(--c-ops-800);
+
+  --gold:        var(--c-gold-600);
+  --gold-soft:   #fff6dc;
+
+  --status-ok-fg:   var(--c-ok-600);
+  --status-ok-bg:   #d1fae5;
+  --status-warn-fg: var(--c-warn-600);
+  --status-warn-bg: #fef3c7;
+  --status-bad-fg:  var(--c-bad-700);
+  --status-bad-bg:  #fee2e2;
+  --status-alert-fg:#ffffff;
+  --status-alert-bg:var(--c-paper-900);
+
+  --signal-mono-fg: var(--c-paper-900);
+
+  --focus-ring: 0 0 0 2px #ffffff, 0 0 0 4px var(--c-ops-600);
+  --glow-ops:   0 0 0 1px rgba(8, 145, 178, 0.18), 0 8px 24px rgba(8, 145, 178, 0.10);
+  --glow-bad:   0 0 0 1px rgba(220, 38, 38, 0.20), 0 8px 24px rgba(220, 38, 38, 0.10);
+}
+
+/* — Base typographic resets that components inherit — */
+.nadit-dark, .nadit-light {
+  font-family: var(--ff-sans);
+  color: var(--fg-primary);
+  background: var(--bg-canvas);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+.nadit-dark *::selection, .nadit-light *::selection {
+  background: var(--accent-soft-bg);
+  color: var(--fg-primary);
+}
+
+/* — Utility: visually-hidden helper for screen readers — */
+.nadit-sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* — Reduced-motion respect — */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* — Scanline / radar accents reserved for officer command surface — */
+.nadit-radar-grid {
+  background-image:
+    linear-gradient(transparent 95%, rgba(34, 211, 238, 0.06) 95%),
+    linear-gradient(90deg, transparent 95%, rgba(34, 211, 238, 0.06) 95%);
+  background-size: 32px 32px;
+}

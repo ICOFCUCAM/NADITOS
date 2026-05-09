@@ -1,5 +1,35 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-html, body { height: 100%; }
-body { background: #0f172a; color: #f8fafc; }
+
+/* GovTech design tokens — sets the .nadit-dark surface for officer use. */
+@import "@naditos/web-common/tokens.css";
+
+html, body {
+  height: 100%;
+  background: var(--bg-canvas);
+  color: var(--fg-primary);
+  font-family: var(--ff-sans);
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+body {
+  /* Subtle radial command-glow behind the workspace. Reduced-motion safe. */
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(34, 211, 238, 0.06), transparent 60%),
+    radial-gradient(800px 400px at -10% 110%, rgba(8, 145, 178, 0.06), transparent 50%),
+    var(--bg-canvas);
+}
+
+/* On-page focus styles — the token system handles colour, here we
+   make sure outline-style is consistent across browsers. */
+:focus-visible { outline: none; }
+
+/* Mobile-first: snap inputs to font-size: 16px to suppress iOS zoom. */
+@media (max-width: 480px) {
+  input, select, textarea { font-size: 16px !important; }
+}
+
+/* Safe-area helper consumed by MobileShell. */
+.safe-area-padding { padding-bottom: env(safe-area-inset-bottom); }

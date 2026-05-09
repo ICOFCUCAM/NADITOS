@@ -1,15 +1,20 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { SessionProvider } from "@naditos/web-common/session";
 
 export const metadata: Metadata = {
-  title: "NADITOS · Ministry",
-  description: "National Digital Transport Operating System — admin",
+  title: "NADITOS · Ministry Command",
+  description: "National transport intelligence platform — ministry operations",
+};
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#060a18",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className="nadit-dark">
       <body>
         <SessionProvider>{children}</SessionProvider>
       </body>

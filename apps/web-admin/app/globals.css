@@ -2,5 +2,23 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body { height: 100%; }
-body { background: #f8fafc; color: #0f172a; }
+/* GovTech design tokens — admin uses the .nadit-dark surface so the
+ * ministry command-center feels like an operations console, not an
+ * admin template. The light surface is reserved for citizen-facing. */
+@import "@naditos/web-common/tokens.css";
+
+html, body {
+  height: 100%;
+  background: var(--bg-canvas);
+  color: var(--fg-primary);
+  font-family: var(--ff-sans);
+}
+
+body {
+  background:
+    radial-gradient(1400px 700px at 90% -10%, rgba(34, 211, 238, 0.05), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(8, 145, 178, 0.05), transparent 50%),
+    var(--bg-canvas);
+}
+
+:focus-visible { outline: none; }

@@ -3,17 +3,20 @@ import "./globals.css";
 import { SessionProvider } from "@naditos/web-common/session";
 
 export const metadata: Metadata = {
-  title: "NADITOS · Police",
-  description: "Officer enforcement app",
+  title: "NADITOS · Officer",
+  description: "National transport enforcement — officer field workspace",
   manifest: "/manifest.webmanifest",
 };
 export const viewport: Viewport = {
-  width: "device-width", initialScale: 1, themeColor: "#0f172a",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#060a18",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className="nadit-dark">
       <body><SessionProvider>{children}</SessionProvider></body>
     </html>
   );
