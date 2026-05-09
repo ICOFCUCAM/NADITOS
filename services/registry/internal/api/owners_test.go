@@ -176,6 +176,71 @@ func TestMyVehicles_ResponseShape(t *testing.T) {
 	_ = citizenID // used implicitly via env.Token's user-row insert
 }
 
+// TestList_FlaggedFilter: the admin /v1/vehicles?flagged=1 query
+// returns only vehicles with at least one operational flag set
+// (is_stolen / is_seized / is_wanted). Drives the "Flagged only"
+// triage view on the admin vehicles page.
+func TestList_FlaggedFilter(t *testing.T) {
+	env := testkit.Setup(t)
+	tok, _ := env.Token("admin", "registry:read")
+	h := build(env)
+
+	plain := "PL-" + uuid.NewString()[:6]
+	stolen := "ST-" + uuid.NewString()[:6]
+	seized := "SZ-" + uuid.NewString()[:6]
+	wanted := "WT-" + uuid.NewString()[:6]
+	env.Exec(`INSERT INTO vehicles (tenant_id, plate) VALUES ($1, $2)`, env.Tenant, plain)
+	env.Exec(`INSERT INTO vehicles (tenant_id, plate, is_stolen) VALUES ($1, $2, true)`, env.Tenant, stolen)
+	env.Exec(`INSERT INTO vehicles (tenant_id, plate, is_seized) VALUES ($1, $2, true)`, env.Tenant, seized)
+	env.Exec(`INSERT INTO vehicles (tenant_id, plate, is_wanted) VALUES ($1, $2, true)`, env.Tenant, wanted)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/vehicles?flagged=1", "", tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Items []struct {
+			Plate    string `json:"plate"`
+			IsStolen bool   `json:"is_stolen"`
+			IsSeized bool   `json:"is_seized"`
+			IsWanted bool   `json:"is_wanted"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	plates := map[string]bool{}
+	for _, it := range resp.Items {
+		plates[it.Plate] = it.IsStolen || it.IsSeized || it.IsWanted
+		if !plates[it.Plate] {
+			t.Errorf("flagged=1 returned unflagged plate %s", it.Plate)
+		}
+	}
+	for _, want := range []string{stolen, seized, wanted} {
+		if !plates[want] {
+			t.Errorf("flagged=1 missed plate %s", want)
+		}
+	}
+	if plates[plain] {
+		t.Errorf("flagged=1 leaked plain plate %s", plain)
+	}
+
+	// And the q + flagged combo narrows further: only stolen+matches q
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET",
+		"/v1/vehicles?flagged=1&q="+stolen[:3], "", tok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("combo: %d %s", rec.Code, rec.Body.String())
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	for _, it := range resp.Items {
+		if !strings.Contains(it.Plate, stolen[:3]) {
+			t.Errorf("q-filter ignored: %s", it.Plate)
+		}
+	}
+}
+
 // TestMyVehicles_StripsIsWanted: is_wanted is an operational marker
 // (active warrant, ANPR alert pipeline). The registered owner must
 // not see it via the citizen endpoint, even when set in the

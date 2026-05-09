@@ -120,14 +120,22 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	defer conn.Release()
 
 	q := r.URL.Query().Get("q")
+	flagged := r.URL.Query().Get("flagged") == "1"
 	limit := 50
 	args := []any{}
 	sql := `SELECT ` + vehicleCols + `
 	          FROM vehicles v
 	          JOIN v_vehicle_status s ON s.id = v.id`
+	conds := []string{}
 	if q != "" {
 		args = append(args, "%"+q+"%")
-		sql += ` WHERE v.plate ILIKE $1 OR v.vin ILIKE $1`
+		conds = append(conds, `(v.plate ILIKE $1 OR v.vin ILIKE $1)`)
+	}
+	if flagged {
+		conds = append(conds, `(v.is_stolen OR v.is_seized OR v.is_wanted)`)
+	}
+	if len(conds) > 0 {
+		sql += ` WHERE ` + joinAnd(conds)
 	}
 	sql += ` ORDER BY v.plate LIMIT ` + itoa(limit)
 
@@ -398,4 +406,18 @@ func itoa(i int) string {
 	if i == 50 { return "50" }
 	if i == 100 { return "100" }
 	return "50"
+}
+
+// joinAnd is a small SQL helper that stitches WHERE-clause fragments
+// together with " AND " so the list handler can compose conditions
+// without dragging strings.Join in for one call site.
+func joinAnd(parts []string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	out := parts[0]
+	for _, p := range parts[1:] {
+		out += " AND " + p
+	}
+	return out
 }
