@@ -262,6 +262,47 @@ func seedBuyerOwner(t *testing.T, env *testkit.Env) (string, string, string, str
 	return vid.String(), plate, ownerID.String(), email
 }
 
+// TestConsumer_LicenseDemerit_SendsRunningTotal: on every demerit
+// event the citizen gets a notice with how many points they took
+// and where they sit against the threshold. Lets them course-correct
+// before they hit suspension.
+func TestConsumer_LicenseDemerit_SendsRunningTotal(t *testing.T) {
+	env := testkit.Setup(t)
+	lid, email := seedLicenseAndCitizen(t, env)
+
+	sender := &captureSender{}
+	c := consumer.New(env.AdminPool(), captureLogger(t), sender)
+	eid := writeOutbox(t, env, events.Envelope{
+		ID: uuid.NewString(), Type: events.TypeLicenseDemerit, Version: 1,
+		Source: "license", TenantID: env.Tenant, OccurredAt: time.Now().UTC(),
+		Data: events.LicenseDemeritPayload{
+			LicenseID: lid, Delta: 6, Reason: "fine:SPEED_30",
+			Source: "fine", NewTotal: 9,
+		},
+	})
+	drainOnce(t, env, c, eid)
+
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.out) != 1 {
+		t.Fatalf("want 1 send, got %d", len(sender.out))
+	}
+	if sender.out[0].To != email {
+		t.Fatalf("recipient: want %s got %s", email, sender.out[0].To)
+	}
+	if !strings.Contains(sender.out[0].Body, "+6 demerit") &&
+		!strings.Contains(sender.out[0].Body, "6 demerit point") {
+		t.Fatalf("body missing delta: %q", sender.out[0].Body)
+	}
+	if !strings.Contains(sender.out[0].Body, "9") {
+		t.Fatalf("body missing new total: %q", sender.out[0].Body)
+	}
+	// Threshold default is 12, so 12 - 9 = 3 remaining — must surface.
+	if !strings.Contains(sender.out[0].Body, "3") {
+		t.Fatalf("body missing remaining-to-suspension: %q", sender.out[0].Body)
+	}
+}
+
 // TestConsumer_VehicleTransferred_NotifiesBuyer: when an accepted
 // transfer's outbox event arrives, the new owner gets one
 // "vehicle transferred to you" notification at the address resolved

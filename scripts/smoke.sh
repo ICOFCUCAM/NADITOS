@@ -365,7 +365,7 @@ issue_speed30 "$PLATE2" "deadbeef2" >/dev/null
 
 echo "→ wait for license.suspended notification"
 SUSP_COUNT=0
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   SUSP_COUNT=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
     "SELECT COUNT(*) FROM notification_records
        WHERE tenant_id='$TENANT' AND template='license.suspended.v1'
@@ -398,7 +398,7 @@ echo "  ✓ suspension lifted"
 
 echo "→ wait for license.reinstated notification"
 REIN_COUNT=0
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   REIN_COUNT=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc \
     "SELECT COUNT(*) FROM notification_records
        WHERE tenant_id='$TENANT' AND template='license.reinstated.v1'

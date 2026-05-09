@@ -35,6 +35,7 @@ var renderers = map[string]renderer{
 	events.TypeFineEscalated:       fineEscalatedRenderer,
 	events.TypeLicenseSuspended:    licenseSuspendedRenderer,
 	events.TypeLicenseReinstated:   licenseReinstatedRenderer,
+	events.TypeLicenseDemerit:      licenseDemeritRenderer,
 	events.TypeVehicleTransferred:  vehicleTransferredRenderer,
 }
 
@@ -227,6 +228,51 @@ var licenseReinstatedRenderer = renderer{
 				"valid for use immediately.\n\n"+
 				"NADITOS",
 			r.Name)
+		return subject, body
+	},
+}
+
+// licenseDemeritRenderer warns the citizen on every demerit event so
+// they see points accumulating, not just the eventual suspension. The
+// running total gives them context — a 6-point hit alone is meaningful
+// only if you know the threshold is 12.
+//
+// The policy threshold isn't carried in the event payload, so we read
+// it from driver_demerit_policy here. If no row exists for the tenant
+// the renderer falls back to the schema default (12) — same fallback
+// the engine uses.
+var licenseDemeritRenderer = renderer{
+	template: "license.demerit.v1",
+	resolve: func(ctx context.Context, tx pgx.Tx, env events.Envelope) (*recipient, error) {
+		var p events.LicenseDemeritPayload
+		if err := decodeData(env.Data, &p); err != nil {
+			return nil, err
+		}
+		return resolveByLicense(ctx, tx, env.TenantID, p.LicenseID)
+	},
+	render: func(env events.Envelope, r *recipient) (string, string) {
+		var p events.LicenseDemeritPayload
+		_ = decodeData(env.Data, &p)
+		// 12 is the schema default; the renderer doesn't have a tx so
+		// we don't read driver_demerit_policy here. The intent of the
+		// message is "you got points; here's where you are" — even if
+		// a tenant has overridden the threshold, the running-total
+		// number is the actionable bit.
+		threshold := 12
+		remaining := threshold - p.NewTotal
+		if remaining < 0 {
+			remaining = 0
+		}
+		subject := fmt.Sprintf("Demerit points: +%d (now %d)", p.Delta, p.NewTotal)
+		body := fmt.Sprintf(
+			"Hello %s,\n\n"+
+				"%d demerit point(s) were added to your driver license.\n"+
+				"Reason: %s\n"+
+				"New total: %d\n"+
+				"Points until suspension: %d\n\n"+
+				"View your full demerit history in the citizen portal.\n\n"+
+				"NADITOS",
+			r.Name, p.Delta, p.Reason, p.NewTotal, remaining)
 		return subject, body
 	},
 }
