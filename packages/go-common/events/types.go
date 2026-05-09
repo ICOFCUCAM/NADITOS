@@ -14,6 +14,7 @@ const (
 	TypeVehicleUpdated   = "vehicle.updated"   // v1
 	TypeVehicleFlagged   = "vehicle.flagged"   // v1
 	TypeVehicleStatusBlack = "vehicle.status.black" // v1
+	TypeVehicleTransferred = "vehicle.transferred"   // v1
 
 	TypeAnprScan        = "anpr.scan"          // v1
 	TypeAnprMatched     = "anpr.matched"       // v1 — scan matched a known vehicle
@@ -80,6 +81,13 @@ type VehicleCreatedPayload struct {
 	VehicleID string `json:"vehicle_id"`
 	Plate     string `json:"plate"`
 	OwnerID   string `json:"owner_id,omitempty"`
+}
+
+type VehicleTransferredPayload struct {
+	VehicleID string `json:"vehicle_id"`
+	Plate     string `json:"plate"`
+	FromOwner string `json:"from_owner"`
+	ToOwner   string `json:"to_owner"`
 }
 
 type VehicleFlaggedPayload struct {

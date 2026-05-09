@@ -240,6 +240,62 @@ func TestConsumer_AdvancesPastFailedSends(t *testing.T) {
 	}
 }
 
+// seedBuyerOwner seeds a citizen user + their owners row + a vehicle
+// pointing at that owner. Returns (vehicle_id, plate, ownerID, email)
+// — the renderer test uses ownerID as the to_owner of the transfer
+// event and asserts the email gets the message.
+func seedBuyerOwner(t *testing.T, env *testkit.Env) (string, string, string, string) {
+	t.Helper()
+	uid := uuid.New()
+	email := fmt.Sprintf("%s@%s", uid.String()[:8], env.Tenant)
+	env.Exec(`INSERT INTO users (id, tenant_id, email, password_hash, full_name)
+	         VALUES ($1, $2, $3, '!', 'New owner')`,
+		uid, env.Tenant, email)
+	ownerID := uuid.New()
+	env.Exec(`INSERT INTO owners (id, tenant_id, user_id, full_name)
+	         VALUES ($1, $2, $3::uuid, 'New owner')`,
+		ownerID, env.Tenant, uid)
+	vid := uuid.New()
+	plate := "XFR-" + uid.String()[:6]
+	env.Exec(`INSERT INTO vehicles (id, tenant_id, plate, owner_id)
+	         VALUES ($1, $2, $3, $4)`, vid, env.Tenant, plate, ownerID)
+	return vid.String(), plate, ownerID.String(), email
+}
+
+// TestConsumer_VehicleTransferred_NotifiesBuyer: when an accepted
+// transfer's outbox event arrives, the new owner gets one
+// "vehicle transferred to you" notification at the address resolved
+// from owners → users. The seller is not notified.
+func TestConsumer_VehicleTransferred_NotifiesBuyer(t *testing.T) {
+	env := testkit.Setup(t)
+	vid, plate, buyerOwnerID, buyerEmail := seedBuyerOwner(t, env)
+
+	sender := &captureSender{}
+	c := consumer.New(env.AdminPool(), captureLogger(t), sender)
+	eid := writeOutbox(t, env, events.Envelope{
+		ID: uuid.NewString(), Type: events.TypeVehicleTransferred, Version: 1,
+		Source: "registry", TenantID: env.Tenant, OccurredAt: time.Now().UTC(),
+		Data: events.VehicleTransferredPayload{
+			VehicleID: vid, Plate: plate,
+			FromOwner: uuid.NewString(), // any UUID — we don't notify the seller
+			ToOwner:   buyerOwnerID,
+		},
+	})
+	drainOnce(t, env, c, eid)
+
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.out) != 1 {
+		t.Fatalf("want 1 send, got %d", len(sender.out))
+	}
+	if sender.out[0].To != buyerEmail {
+		t.Fatalf("recipient: want %s got %s", buyerEmail, sender.out[0].To)
+	}
+	if !strings.Contains(sender.out[0].Body, plate) {
+		t.Fatalf("body missing plate: %q", sender.out[0].Body)
+	}
+}
+
 // seedLicenseAndCitizen seeds a driver license linked to a citizen user
 // and returns (licenseID, citizenEmail).
 func seedLicenseAndCitizen(t *testing.T, env *testkit.Env) (string, string) {

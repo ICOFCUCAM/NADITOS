@@ -268,15 +268,18 @@ func (a *API) acceptTransfer(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, err)
 		return
 	}
-	// Outbox vehicle.updated so consumers (notifications, analytics)
-	// see the new owner without having to poll.
+	// Look up the plate inside the same tx so the event payload is
+	// human-readable for downstream renderers (notifications, audit).
+	var plate string
+	_ = tx.QueryRow(r.Context(),
+		`SELECT plate FROM vehicles WHERE id=$1`, vehicleID).Scan(&plate)
 	env := events.EnvelopeFromContext(r.Context(), "registry", c.TenantID,
-		events.TypeVehicleUpdated, 1,
-		map[string]any{
-			"vehicle_id": vehicleID.String(),
-			"event":      "ownership_transferred",
-			"from_owner": fromOwner.String(),
-			"to_owner":   buyerOwnerID.String(),
+		events.TypeVehicleTransferred, 1,
+		events.VehicleTransferredPayload{
+			VehicleID: vehicleID.String(),
+			Plate:     plate,
+			FromOwner: fromOwner.String(),
+			ToOwner:   buyerOwnerID.String(),
 		})
 	if err := events.WriteOutbox(r.Context(), tx, env); err != nil {
 		httpx.WriteErr(w, err)

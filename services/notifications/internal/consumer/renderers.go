@@ -30,11 +30,12 @@ type renderer struct {
 // renderers is the registry mapping event types to their renderer.
 // New event subscribers are added here.
 var renderers = map[string]renderer{
-	events.TypeFineIssued:        fineIssuedRenderer,
-	events.TypeFinePaid:          finePaidRenderer,
-	events.TypeFineEscalated:     fineEscalatedRenderer,
-	events.TypeLicenseSuspended:  licenseSuspendedRenderer,
-	events.TypeLicenseReinstated: licenseReinstatedRenderer,
+	events.TypeFineIssued:          fineIssuedRenderer,
+	events.TypeFinePaid:            finePaidRenderer,
+	events.TypeFineEscalated:       fineEscalatedRenderer,
+	events.TypeLicenseSuspended:    licenseSuspendedRenderer,
+	events.TypeLicenseReinstated:   licenseReinstatedRenderer,
+	events.TypeVehicleTransferred:  vehicleTransferredRenderer,
 }
 
 // ─── Resolvers ──────────────────────────────────────────────────────────────
@@ -226,6 +227,56 @@ var licenseReinstatedRenderer = renderer{
 				"valid for use immediately.\n\n"+
 				"NADITOS",
 			r.Name)
+		return subject, body
+	},
+}
+
+// vehicleTransferredRenderer notifies the buyer (the new owner) that
+// the transfer they accepted has settled. Resolves contact via the
+// to_owner row; we don't notify the seller — they already saw the
+// status flip in their /transfers page and don't need a second nudge.
+var vehicleTransferredRenderer = renderer{
+	template: "vehicle.transferred.v1",
+	resolve: func(ctx context.Context, tx pgx.Tx, env events.Envelope) (*recipient, error) {
+		var p events.VehicleTransferredPayload
+		if err := decodeData(env.Data, &p); err != nil {
+			return nil, err
+		}
+		row := tx.QueryRow(ctx,
+			`SELECT COALESCE(u.email::text, o.email::text, ''),
+			        COALESCE(u.phone, o.phone, ''),
+			        COALESCE(u.full_name, o.full_name, '')
+			   FROM owners o
+			   LEFT JOIN users u ON u.id = o.user_id
+			  WHERE o.id = $1::uuid AND o.tenant_id = $2`,
+			p.ToOwner, env.TenantID)
+		var email, phone, name string
+		if err := row.Scan(&email, &phone, &name); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		switch {
+		case email != "":
+			return &recipient{Channel: "email", Address: email, Name: name, Locale: "en"}, nil
+		case phone != "":
+			return &recipient{Channel: "sms", Address: phone, Name: name, Locale: "en"}, nil
+		}
+		return nil, nil
+	},
+	render: func(env events.Envelope, r *recipient) (string, string) {
+		var p events.VehicleTransferredPayload
+		_ = decodeData(env.Data, &p)
+		subject := "Vehicle ownership transferred to you"
+		body := fmt.Sprintf(
+			"Hello %s,\n\n"+
+				"Vehicle %s has been transferred to your account.\n"+
+				"You're now responsible for its insurance, inspection, "+
+				"and any future fines.\n\n"+
+				"View it in your citizen portal under My vehicles.\n\n"+
+				"NADITOS",
+			r.Name, p.Plate)
 		return subject, body
 	},
 }
