@@ -128,6 +128,142 @@ func TestLogin_InactiveUser_401(t *testing.T) {
 	}
 }
 
+// loginGetTokens runs login and parses out access + refresh tokens.
+// Returns "", "" if login fails (test helper, t.Fatal-friendly).
+func loginGetTokens(t *testing.T, env *testkit.Env, h http.Handler, email, pw string) (string, string) {
+	t.Helper()
+	rec := login(t, env, h, email, pw)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.AccessToken, out.RefreshToken
+}
+
+// TestRefresh_HappyPath: a valid refresh token mints a fresh access
+// token. The new access token parses + carries the right tenant.
+func TestRefresh_HappyPath(t *testing.T) {
+	env := testkit.Setup(t)
+	h := build(env)
+	seedUser(t, env, h, "ref@example.com", "secret123", "admin")
+	_, refresh := loginGetTokens(t, env, h, "ref@example.com", "secret123")
+
+	r := httptest.NewRequest("POST", "/v1/auth/refresh", strings.NewReader(
+		`{"refresh_token":"`+refresh+`"}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Tenant-Id", env.Tenant)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct{ AccessToken string `json:"access_token"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.AccessToken == "" {
+		t.Fatal("refresh returned empty access token")
+	}
+}
+
+// TestRefresh_BogusToken_401: a token that doesn't match any
+// refresh_tokens row returns 401, not 500.
+func TestRefresh_BogusToken_401(t *testing.T) {
+	env := testkit.Setup(t)
+	h := build(env)
+	r := httptest.NewRequest("POST", "/v1/auth/refresh", strings.NewReader(
+		`{"refresh_token":"bogus"}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Tenant-Id", env.Tenant)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bogus refresh: %d", rec.Code)
+	}
+}
+
+// TestRefresh_AfterLogout_401: logout revokes the refresh row, so a
+// subsequent refresh with the same token must fail.
+func TestRefresh_AfterLogout_401(t *testing.T) {
+	env := testkit.Setup(t)
+	h := build(env)
+	seedUser(t, env, h, "lo@example.com", "pw1234", "citizen")
+	_, refresh := loginGetTokens(t, env, h, "lo@example.com", "pw1234")
+
+	// Logout.
+	r := httptest.NewRequest("POST", "/v1/auth/logout", strings.NewReader(
+		`{"refresh_token":"`+refresh+`"}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Tenant-Id", env.Tenant)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("logout: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Refresh should now 401.
+	r = httptest.NewRequest("POST", "/v1/auth/refresh", strings.NewReader(
+		`{"refresh_token":"`+refresh+`"}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Tenant-Id", env.Tenant)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("refresh after logout: %d", rec.Code)
+	}
+}
+
+// TestMe_ReturnsClaims: GET /v1/auth/me with a valid bearer returns
+// the JWT claims (id, tenant, role). No bearer → 401, bad bearer → 401.
+func TestMe_ReturnsClaims(t *testing.T) {
+	env := testkit.Setup(t)
+	h := build(env)
+	seedUser(t, env, h, "me@example.com", "pw1234", "officer")
+	access, _ := loginGetTokens(t, env, h, "me@example.com", "pw1234")
+
+	r := httptest.NewRequest("GET", "/v1/auth/me", nil)
+	r.Header.Set("Authorization", "Bearer "+access)
+	r.Header.Set("X-Tenant-Id", env.Tenant)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Tenant string `json:"tenant"`
+		Role   string `json:"role"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Tenant != env.Tenant || out.Role != "officer" {
+		t.Fatalf("claims: %+v", out)
+	}
+
+	// No bearer.
+	r = httptest.NewRequest("GET", "/v1/auth/me", nil)
+	r.Header.Set("X-Tenant-Id", env.Tenant)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no bearer: %d", rec.Code)
+	}
+
+	// Bad bearer.
+	r = httptest.NewRequest("GET", "/v1/auth/me", nil)
+	r.Header.Set("Authorization", "Bearer not-a-jwt")
+	r.Header.Set("X-Tenant-Id", env.Tenant)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad bearer: %d", rec.Code)
+	}
+}
+
 // TestLogin_TenantIsolation: the same email registered in two tenants
 // must resolve to the right user based on the X-Tenant-Id header,
 // not collapse into one. RLS isn't enough here — login crosses tenants
