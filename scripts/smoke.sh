@@ -241,6 +241,22 @@ SELECT count(*) FROM audit_alerts
 done
 [ "${ALERT_COUNT:-0}" -ge 1 ] || {
   echo "✗ expected anpr_match_flagged_vehicle alert, got $ALERT_COUNT"
+  echo "  alerts for this subject (ignoring time):"
+  PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -c "
+    SELECT detected_at, kind, subject_id::text
+      FROM audit_alerts
+     WHERE subject_id='$ALERT_VID';"
+  echo "  outbox events of type anpr.alert:"
+  PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -c "
+    SELECT id, created_at, delivered_at IS NOT NULL AS done
+      FROM event_outbox
+     WHERE envelope->>'type'='anpr.alert'
+     ORDER BY id DESC LIMIT 3;"
+  echo "  consumer offset:"
+  PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -c "
+    SELECT consumer, last_event_id
+      FROM event_consumer_offsets
+     WHERE consumer='audit-anpr-alerts';"
   exit 1
 }
 echo "  ✓ audit_alert raised for flagged vehicle"
