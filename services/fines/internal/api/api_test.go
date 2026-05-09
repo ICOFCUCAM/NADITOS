@@ -743,6 +743,55 @@ func TestDispute_ClosedFinesRejected(t *testing.T) {
 	}
 }
 
+// TestListIssuedByMe_OnlyMyIssuance: officer A issues a fine,
+// officer B issues a different fine — calling /v1/fines/issued-by-me
+// as A returns only A's fine. Citizens / officers without
+// fines:create get 403.
+func TestListIssuedByMe_OnlyMyIssuance(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plateA := newVehicle(t, env)
+	_, plateB := newVehicle(t, env)
+
+	tokA, _ := env.Token("officer", "fines:create")
+	tokB, _ := env.Token("officer", "fines:create")
+	citizen, _ := env.Token("citizen")
+	h := build(env)
+
+	for _, p := range []struct{ tok, plate string }{
+		{tokA, plateA}, {tokB, plateB},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+			validIssueBody(p.plate, "INS_EXPIRED"), p.tok))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("issue %s: %d %s", p.plate, rec.Code, rec.Body.String())
+		}
+	}
+
+	// A sees only A's fine.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/fines/issued-by-me", "", tokA))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("A list: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Items []struct{ Plate string `json:"plate"` } `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Items) != 1 || out.Items[0].Plate != plateA {
+		t.Fatalf("A view: want [%s], got %+v", plateA, out.Items)
+	}
+
+	// Citizen without fines:create gets 403.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/fines/issued-by-me", "", citizen))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("citizen list: want 403, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestGet_OwnerCanRead_NonOwner403: the citizen who owns the
 // vehicle/fine sees full details (evidence, custody) on
 // GET /v1/fines/{id} without holding fines:read; an unrelated

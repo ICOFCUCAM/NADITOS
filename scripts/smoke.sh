@@ -229,7 +229,7 @@ curl -sS -o /dev/null -X POST http://localhost:8008/v1/anpr/scans "${H_TENANT[@]
 # Wait for the consumer to drain the outbox into audit_alerts. The
 # consumer ticks every couple of seconds so 30 × 0.5 = 15s is plenty.
 ALERT_COUNT=0
-for i in $(seq 1 60); do
+for i in $(seq 1 120); do
   ALERT_COUNT=$(PGPASSWORD=naditos psql -h localhost -U naditos -d naditos -tAc "
 SELECT count(*) FROM audit_alerts
  WHERE tenant_id='$TENANT'

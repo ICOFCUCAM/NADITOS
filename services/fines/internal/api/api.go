@@ -70,6 +70,11 @@ func New(cfg config.Service, log *slog.Logger, pool, adminPool *pgxpool.Pool,
 	mux.Handle("POST /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:create")(http.HandlerFunc(a.issue))))
 	mux.Handle("GET  /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:read")(http.HandlerFunc(a.list))))
 	mux.Handle("GET  /v1/fines/mine",     issuer.Middleware(http.HandlerFunc(a.listMine)))
+	// Officer self-listing: fines I personally issued. Officers don't
+	// hold fines:read (that's an admin/court permission) but they need
+	// to be able to see their own issuance history.
+	mux.Handle("GET  /v1/fines/issued-by-me",
+		issuer.Middleware(auth.RequirePermission("fines:create")(http.HandlerFunc(a.listIssuedByMe))))
 	// GET /v1/fines/{id} — admin (fines:read) OR citizen who owns it.
 	// The handler enforces the owner branch internally; perm gate is
 	// applied per-request rather than at the route, so the citizen
@@ -387,6 +392,42 @@ func (a *API) listMine(w http.ResponseWriter, r *http.Request) {
 		   LEFT JOIN owners   o ON o.id = v.owner_id
 		  WHERE o.user_id = $1 OR f.driver_user_id = $1
 		  ORDER BY f.issued_at DESC LIMIT 100`,
+		c.Subject)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer rows.Close()
+	out := []fineOut{}
+	for rows.Next() {
+		var f fineOut
+		if err := rows.Scan(&f.ID, &f.Plate, &f.OffenceCode, &f.Amount, &f.Currency,
+			&f.Status, &f.IssuedAt, &f.DueAt, &f.IssuedBy, &f.EscalationStage); err != nil {
+			httpx.WriteErr(w, err)
+			return
+		}
+		out = append(out, f)
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+// listIssuedByMe returns fines the caller personally stamped via
+// POST /v1/fines. Mirrors listMine but filters on issued_by, which is
+// the right "what did I do today" view for officers.
+func (a *API) listIssuedByMe(w http.ResponseWriter, r *http.Request) {
+	c := auth.ClaimsFrom(r.Context())
+	conn, err := db.WithTenant(r.Context(), a.pool)
+	if err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
+	defer conn.Release()
+	rows, err := conn.Query(r.Context(),
+		`SELECT id, plate, offence_code, amount::text, currency,
+		        status::text, issued_at, due_at, issued_by, escalation_stage
+		   FROM fines
+		  WHERE issued_by = $1
+		  ORDER BY issued_at DESC LIMIT 100`,
 		c.Subject)
 	if err != nil {
 		httpx.WriteErr(w, err)

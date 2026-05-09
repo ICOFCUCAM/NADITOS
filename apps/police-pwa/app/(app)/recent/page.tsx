@@ -13,7 +13,7 @@ export default function RecentPage() {
   const [items, setItems] = useState<Fine[]>([]);
   useEffect(() => {
     if (!session) return;
-    services.fines("/v1/fines", { token: session.accessToken, tenant: session.user.tenant })
+    services.fines("/v1/fines/issued-by-me", { token: session.accessToken, tenant: session.user.tenant })
       .then((r: any) => setItems(r.items ?? [])).catch(() => setItems([]));
   }, [session]);
   return (
