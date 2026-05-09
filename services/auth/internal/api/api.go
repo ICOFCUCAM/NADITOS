@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
+	"github.com/icofcucam/naditos/packages/go-common/observability"
 )
 
 type API struct {
@@ -62,8 +64,13 @@ type meResp struct {
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
 func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	rid, _, _ := observability.IDs(ctx)
+
 	var req loginReq
 	if err := httpx.ReadJSON(r, &req); err != nil {
+		a.log.Warn("login: bad request body",
+			slog.String("rid", rid), slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
@@ -74,10 +81,17 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if tenant == "" {
 		tenant = a.cfg.DefaultTenant
 	}
+	lg := a.log.With(
+		slog.String("rid", rid),
+		slog.String("step", "login"),
+		slog.String("tenant", tenant),
+		slog.String("email", req.Email),
+	)
+	lg.Info("login: start")
 
-	ctx := r.Context()
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
+		lg.Error("login: begin tx failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
@@ -85,6 +99,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// The auth service is the single component that operates across all
 	// tenants (login is the moment we *establish* a tenant for the request).
 	if _, err := tx.Exec(ctx, "SET LOCAL row_security = off"); err != nil {
+		lg.Error("login: SET LOCAL row_security=off failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
@@ -100,21 +115,37 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		   FROM users
 		  WHERE tenant_id=$1 AND email=$2`,
 		tenant, req.Email).Scan(&userID, &passwordHash, &fullName, &isActive)
-	if err != nil || !isActive {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		lg.Info("login: user not found")
+		httpx.WriteErr(w, httpx.ErrUnauthorized)
+		return
+	case err != nil:
+		lg.Error("login: user lookup query failed", slog.String("err", err.Error()))
+		httpx.WriteErr(w, err)
+		return
+	case !isActive:
+		lg.Info("login: user inactive", slog.String("user_id", userID.String()))
 		httpx.WriteErr(w, httpx.ErrUnauthorized)
 		return
 	}
+	lg = lg.With(slog.String("user_id", userID.String()))
+	lg.Info("login: user found, verifying password")
+
 	if err := auth.CheckPassword(passwordHash, req.Password); err != nil {
+		lg.Info("login: password mismatch", slog.String("err", err.Error()))
 		httpx.WriteErr(w, httpx.ErrUnauthorized)
 		return
 	}
 
-	// Pick the highest-privilege role; expand later for multi-role JWTs.
 	role, perms, err := loadRoleAndPerms(ctx, tx, tenant, userID)
 	if err != nil {
+		lg.Error("login: load role/perms failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
+	lg.Info("login: roles loaded",
+		slog.String("role", role), slog.Int("perm_count", len(perms)))
 
 	access, err := a.issuer.Sign(userID, auth.Claims{
 		TenantID:    tenant,
@@ -122,6 +153,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Permissions: perms,
 	})
 	if err != nil {
+		lg.Error("login: JWT sign failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
@@ -132,13 +164,16 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		`INSERT INTO refresh_tokens (tenant_id, user_id, token_hash, expires_at)
 		 VALUES ($1,$2,$3,$4)`,
 		tenant, userID, refreshHash, exp); err != nil {
+		lg.Error("login: insert refresh_token failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
+		lg.Error("login: commit failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
+	lg.Info("login: success")
 
 	httpx.WriteJSON(w, http.StatusOK, tokenResp{
 		AccessToken:  access,
@@ -152,21 +187,27 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	rid, _, _ := observability.IDs(ctx)
+	lg := a.log.With(slog.String("rid", rid), slog.String("step", "refresh"))
+
 	var req struct{ RefreshToken string `json:"refresh_token"` }
 	if err := httpx.ReadJSON(r, &req); err != nil {
+		lg.Warn("refresh: bad request body", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
 	hash := hashToken(req.RefreshToken)
 
-	ctx := r.Context()
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
+		lg.Error("refresh: begin tx failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, "SET LOCAL row_security = off"); err != nil {
+		lg.Error("refresh: SET LOCAL failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
@@ -182,17 +223,34 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		`SELECT id, user_id, tenant_id, expires_at, revoked_at
 		   FROM refresh_tokens WHERE token_hash=$1`, hash).
 		Scan(&id, &userID, &tenant, &expiresAt, &revokedAt)
-	if err != nil || revokedAt != nil || time.Now().After(expiresAt) {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		lg.Info("refresh: token not found")
+		httpx.WriteErr(w, httpx.ErrUnauthorized)
+		return
+	case err != nil:
+		lg.Error("refresh: lookup query failed", slog.String("err", err.Error()))
+		httpx.WriteErr(w, err)
+		return
+	case revokedAt != nil:
+		lg.Info("refresh: token revoked", slog.String("user_id", userID.String()))
+		httpx.WriteErr(w, httpx.ErrUnauthorized)
+		return
+	case time.Now().After(expiresAt):
+		lg.Info("refresh: token expired", slog.String("user_id", userID.String()))
 		httpx.WriteErr(w, httpx.ErrUnauthorized)
 		return
 	}
 
 	role, perms, err := loadRoleAndPerms(ctx, tx, tenant, userID)
 	if err != nil {
+		lg.Error("refresh: load role/perms failed",
+			slog.String("user_id", userID.String()), slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
+		lg.Error("refresh: commit failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
@@ -200,6 +258,7 @@ func (a *API) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		TenantID: tenant, Role: role, Permissions: perms,
 	})
 	if err != nil {
+		lg.Error("refresh: JWT sign failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
@@ -242,6 +301,9 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 // In production, this must be behind admin RBAC; we accept tenant from
 // the X-Tenant-Id header and require ADMIN_BOOTSTRAP_KEY env or an admin JWT.
 func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	rid, _, _ := observability.IDs(ctx)
+
 	type req struct {
 		Email    string   `json:"email"`
 		Password string   `json:"password"`
@@ -250,6 +312,8 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	var in req
 	if err := httpx.ReadJSON(r, &in); err != nil {
+		a.log.Warn("admin_create_user: bad request body",
+			slog.String("rid", rid), slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
@@ -257,20 +321,30 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	if tenant == "" {
 		tenant = a.cfg.DefaultTenant
 	}
+	lg := a.log.With(
+		slog.String("rid", rid),
+		slog.String("step", "admin_create_user"),
+		slog.String("tenant", tenant),
+		slog.String("email", in.Email),
+	)
+	lg.Info("admin_create_user: start", slog.Any("roles", in.Roles))
+
 	hash, err := auth.HashPassword(in.Password)
 	if err != nil {
+		lg.Error("admin_create_user: hash password failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
 
-	ctx := r.Context()
 	tx, err := a.pool.Begin(ctx)
 	if err != nil {
+		lg.Error("admin_create_user: begin tx failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, "SET LOCAL row_security = off"); err != nil {
+		lg.Error("admin_create_user: SET LOCAL failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
@@ -283,6 +357,7 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 		 RETURNING id`,
 		tenant, in.Email, hash, in.FullName).Scan(&id)
 	if err != nil {
+		lg.Error("admin_create_user: upsert user failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
@@ -291,14 +366,18 @@ func (a *API) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 			`INSERT INTO user_roles (tenant_id, user_id, role_code)
 			 VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
 			tenant, id, role); err != nil {
+			lg.Error("admin_create_user: insert user_role failed",
+				slog.String("role", role), slog.String("err", err.Error()))
 			httpx.WriteErr(w, err)
 			return
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
+		lg.Error("admin_create_user: commit failed", slog.String("err", err.Error()))
 		httpx.WriteErr(w, err)
 		return
 	}
+	lg.Info("admin_create_user: success", slog.String("user_id", id.String()))
 	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": id.String()})
 }
 
