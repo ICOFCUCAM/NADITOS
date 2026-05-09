@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -17,6 +18,20 @@ import (
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
 )
+
+// subtleEq is a tiny constant-time string comparison used for the
+// admin-bootstrap-key bypass. Length is checked separately by the
+// caller; this loop assumes equal-length inputs.
+func subtleEq(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var v byte
+	for i := 0; i < len(a); i++ {
+		v |= a[i] ^ b[i]
+	}
+	return v == 0
+}
 
 type Gateway struct {
 	log     *slog.Logger
@@ -96,8 +111,22 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auth — verify JWT once at the edge for protected routes.
+	// AllowBootstrapKey is the seeding escape hatch: an X-Admin-Bootstrap-Key
+	// header that matches ADMIN_BOOTSTRAP_KEY skips the JWT/role check
+	// entirely. The upstream (auth service) re-verifies the same value;
+	// the env var has to be set on both apps for the bypass to work,
+	// which is the design intent.
 	tenant := r.Header.Get("X-Tenant-Id")
-	if match.NeedsAuth {
+	bootstrapped := false
+	if match.AllowBootstrapKey {
+		if k := os.Getenv("ADMIN_BOOTSTRAP_KEY"); k != "" {
+			got := r.Header.Get("X-Admin-Bootstrap-Key")
+			if len(got) == len(k) && subtleEq(got, k) {
+				bootstrapped = true
+			}
+		}
+	}
+	if match.NeedsAuth && !bootstrapped {
 		tok := auth.BearerToken(r)
 		if tok == "" {
 			httpx.WriteErr(w, httpx.ErrUnauthorized)

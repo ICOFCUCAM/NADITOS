@@ -9,6 +9,14 @@ type Route struct {
 	NeedsAuth   bool
 	NeedsRole   string // empty = any authenticated user
 	RateLimit   int    // req/min/tenant; 0 = unlimited
+
+	// AllowBootstrapKey lets a request bypass the JWT/role check at the
+	// gateway if it carries an X-Admin-Bootstrap-Key header that matches
+	// the ADMIN_BOOTSTRAP_KEY env var. Used exclusively for the
+	// /v1/admin/users seeding endpoint, which is the only way to create
+	// the very first admin user — there's no admin JWT to present yet.
+	// The auth service re-verifies the same key, so this is layered.
+	AllowBootstrapKey bool
 }
 
 // RoutesFromEnv builds the default route table from environment variables.
@@ -29,7 +37,7 @@ func RoutesFromEnv() []Route {
 		{Prefix: "/v1/auth/refresh",  Upstream: auth, NeedsAuth: false, RateLimit: 120},
 		{Prefix: "/v1/auth/logout",   Upstream: auth, NeedsAuth: false, RateLimit: 60},
 		{Prefix: "/v1/auth/me",       Upstream: auth, NeedsAuth: true},
-		{Prefix: "/v1/admin/users",   Upstream: auth, NeedsAuth: true, NeedsRole: "admin"},
+		{Prefix: "/v1/admin/users",   Upstream: auth, NeedsAuth: true, NeedsRole: "admin", AllowBootstrapKey: true},
 
 		// Provider webhooks are signature-authenticated, never JWT — and
 		// providers won't send us a tenant header. Match BEFORE the
