@@ -6,7 +6,7 @@ import { useEffect } from "react";
 import { useSession } from "@naditos/web-common";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
-  const { session, loading, logout } = useSession();
+  const { session, loading } = useSession();
   const router = useRouter();
   useEffect(() => {
     if (!loading && !session) router.replace("/login");
@@ -23,16 +23,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
         <NavLink href="/scan"   label="Scan" />
         <NavLink href="/verify" label="Verify" />
         <NavLink href="/recent" label="Recent" />
-        <NavLink href="/me"     label="Me" onClick={() => logout().then(() => router.replace("/login"))} />
+        <NavLink href="/me"     label="Me" />
       </nav>
     </div>
   );
 }
 
-function NavLink({ href, label, onClick }: { href: string; label: string; onClick?: () => void }) {
-  if (onClick) return (
-    <button onClick={onClick} className="py-3 text-sm hover:bg-slate-700">{label}</button>
-  );
+function NavLink({ href, label }: { href: string; label: string }) {
   return (
     <Link href={href} className="py-3 text-sm text-center hover:bg-slate-700">{label}</Link>
   );

@@ -52,6 +52,11 @@ func RoutesFromEnv() []Route {
 
 		{Prefix: "/v1/vehicles",      Upstream: registry, NeedsAuth: true, RateLimit: 600},
 		{Prefix: "/v1/fines",         Upstream: fines,    NeedsAuth: true, RateLimit: 600},
+		// Officer self-stats live on a sub-prefix that's NOT admin-gated
+		// so officers can view their own activity. Must come before
+		// /v1/audit's admin gate by being a longer prefix; longest-
+		// prefix-wins handles that automatically.
+		{Prefix: "/v1/audit/officers/me", Upstream: audit, NeedsAuth: true},
 		{Prefix: "/v1/audit",         Upstream: audit,    NeedsAuth: true, NeedsRole: "admin"},
 		{Prefix: "/v1/licenses",      Upstream: license,  NeedsAuth: true},
 		{Prefix: "/v1/insurance",     Upstream: insurance, NeedsAuth: true},

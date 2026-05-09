@@ -68,6 +68,7 @@ func build(t *testing.T) (http.Handler, *auth.Issuer,
 		{Prefix: "/v1/owners",                        Upstream: regSrv.URL,  NeedsAuth: true, NeedsRole: "admin"},
 		{Prefix: "/v1/vehicles",                      Upstream: regSrv.URL,  NeedsAuth: true},
 		{Prefix: "/v1/fines",                         Upstream: finSrv.URL,  NeedsAuth: true},
+		{Prefix: "/v1/audit/officers/me",             Upstream: audSrv.URL,  NeedsAuth: true},
 		{Prefix: "/v1/audit",                         Upstream: audSrv.URL,  NeedsAuth: true, NeedsRole: "admin"},
 		{Prefix: "/v1/notify",                        Upstream: notSrv.URL,  NeedsAuth: true, NeedsRole: "admin"},
 	}
@@ -166,6 +167,29 @@ func TestRoute_NotificationsLandsOnNotifyUpstream(t *testing.T) {
 	}
 	if registry.last != "" {
 		t.Fatalf("registry incorrectly received it: %q", registry.last)
+	}
+}
+
+// TestRoute_AuditOfficerMe_NoAdminRequired: officer self-stats live
+// on /v1/audit/officers/me/* — gated by JWT, NOT by admin role. A
+// citizen JWT goes through the auth check; the actual permission gate
+// lives at the service. This test pins the longest-prefix-wins
+// precedence: the more-specific /v1/audit/officers/me must NOT be
+// caught by /v1/audit's admin-only rule.
+func TestRoute_AuditOfficerMe_NoAdminRequired(t *testing.T) {
+	h, issuer, _, _, _, _, audit, _ := build(t)
+	tok := mintToken(t, issuer, "officer")
+	r := httptest.NewRequest("GET", "/v1/audit/officers/me/stats", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	r.Header.Set("X-Tenant-Id", "test")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("officer self-stats: want 200, got %d %s", rec.Code, rec.Body.String())
+	}
+	if audit.last != "/v1/audit/officers/me/stats" {
+		t.Fatalf("audit upstream wasn't reached: %q", audit.last)
 	}
 }
 
