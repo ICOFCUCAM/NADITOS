@@ -38,8 +38,9 @@ func RoutesFromEnv() []Route {
 		{Prefix: "/v1/fines/payments/webhooks/", Upstream: fines, NeedsAuth: false, RateLimit: 600},
 
 		// Citizen self-service. Each /v1/citizens/me/* path is owned by
-		// a different upstream; longer-specific prefixes must come
-		// first because routing is first-match-wins.
+		// a different upstream. The gateway resolves by longest-prefix
+		// match, so specific routes here win against any future
+		// /v1/citizens fallback regardless of declaration order.
 		{Prefix: "/v1/citizens/me/license",   Upstream: license,  NeedsAuth: true},
 		{Prefix: "/v1/citizens/me/owner",     Upstream: registry, NeedsAuth: true},
 		{Prefix: "/v1/citizens/me/vehicles",  Upstream: registry, NeedsAuth: true},
