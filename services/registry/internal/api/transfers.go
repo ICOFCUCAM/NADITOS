@@ -81,22 +81,34 @@ func (a *API) startTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
-	// Confirm the caller is the current owner of this vehicle. The
-	// LEFT JOIN here is intentional — vehicles with no owner row aren't
-	// transferable through this flow.
+	// Confirm the caller is the current owner of this vehicle, and
+	// that the vehicle isn't operationally flagged. Stolen / seized /
+	// wanted vehicles must not be launderable through citizen-driven
+	// ownership transfers — a police-flagged car has to clear the flag
+	// before its title can move.
+	//
+	// The error message stays generic ("not_transferable") so the
+	// response doesn't leak which flag is set — is_wanted in
+	// particular is operational and the seller must not learn it.
 	var ownerID uuid.UUID
+	var isStolen, isSeized, isWanted bool
 	err = tx.QueryRow(r.Context(),
-		`SELECT o.id
+		`SELECT o.id, v.is_stolen, v.is_seized, v.is_wanted
 		   FROM vehicles v
 		   JOIN owners   o ON o.id = v.owner_id
 		  WHERE v.id = $1 AND o.user_id = $2`,
-		vehicleID, c.Subject).Scan(&ownerID)
+		vehicleID, c.Subject).Scan(&ownerID, &isStolen, &isSeized, &isWanted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		httpx.WriteErr(w, httpx.ErrForbidden)
 		return
 	}
 	if err != nil {
 		httpx.WriteErr(w, err)
+		return
+	}
+	if isStolen || isSeized || isWanted {
+		httpx.WriteErr(w, httpx.Err(http.StatusConflict, "not_transferable",
+			"this vehicle cannot be transferred — contact your local registry"))
 		return
 	}
 
@@ -221,7 +233,10 @@ func (a *API) acceptTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Lock the transfer row. The unique index on (tenant, code) WHERE
-	// status='pending' guarantees at most one match.
+	// status='pending' guarantees at most one match. Re-check the
+	// vehicle's flag state inside the same tx because a police flag
+	// added after the seller generated the code must still block the
+	// accept side.
 	var transferID, vehicleID, fromOwner uuid.UUID
 	var expiresAt time.Time
 	err = tx.QueryRow(r.Context(),
@@ -250,6 +265,27 @@ func (a *API) acceptTransfer(w http.ResponseWriter, r *http.Request) {
 	if buyerOwnerID == fromOwner {
 		httpx.WriteErr(w, httpx.Err(http.StatusBadRequest, "self_transfer",
 			"cannot accept your own transfer"))
+		return
+	}
+
+	// Re-check operational flags against the locked vehicle row. If
+	// police flagged the car after the seller shared the code, the
+	// buyer must not get the title.
+	var isStolen, isSeized, isWanted bool
+	if err := tx.QueryRow(r.Context(),
+		`SELECT is_stolen, is_seized, is_wanted FROM vehicles WHERE id=$1`,
+		vehicleID).Scan(&isStolen, &isSeized, &isWanted); err != nil {
+		httpx.WriteErr(w, err); return
+	}
+	if isStolen || isSeized || isWanted {
+		// Cancel the transfer so the seller's stale code can't be
+		// retried later.
+		_, _ = tx.Exec(r.Context(),
+			`UPDATE vehicle_transfers SET status='cancelled' WHERE id=$1`,
+			transferID)
+		_ = tx.Commit(r.Context())
+		httpx.WriteErr(w, httpx.Err(http.StatusConflict, "not_transferable",
+			"this vehicle cannot be transferred — contact your local registry"))
 		return
 	}
 

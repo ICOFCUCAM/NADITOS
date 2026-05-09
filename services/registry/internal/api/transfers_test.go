@@ -267,3 +267,103 @@ func TestTransfer_CodeHiddenAfterTerminal(t *testing.T) {
 		t.Fatalf("code on cancelled row not redacted: %q", list.Items[0].Code)
 	}
 }
+
+// TestTransfer_FlaggedVehicle_Blocked: a vehicle marked stolen,
+// seized, or wanted cannot be transferred. The seller's start
+// returns 409 not_transferable with a generic message — we must
+// not leak which flag is set (is_wanted in particular is
+// operational).
+func TestTransfer_FlaggedVehicle_Blocked(t *testing.T) {
+	cases := []string{"is_stolen", "is_seized", "is_wanted"}
+	for _, flag := range cases {
+		flag := flag
+		t.Run(flag, func(t *testing.T) {
+			env := testkit.Setup(t)
+			sellerTok, _, vid, _ := seedSellerWithVehicle(t, env)
+			env.Exec(`UPDATE vehicles SET `+flag+`=true WHERE id=$1`, vid)
+
+			rec := httptest.NewRecorder()
+			build(env).ServeHTTP(rec, env.Req("POST",
+				"/v1/citizens/me/vehicles/"+vid.String()+"/transfer",
+				`{"to_contact":"x@x.com"}`, sellerTok))
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("flag=%s start: want 409, got %d %s",
+					flag, rec.Code, rec.Body.String())
+			}
+			// The body must not name the flag (especially is_wanted).
+			body := rec.Body.String()
+			for _, leaky := range []string{"stolen", "seized", "wanted"} {
+				if containsCI(body, leaky) {
+					t.Errorf("flag=%s response leaks %q: %s", flag, leaky, body)
+				}
+			}
+		})
+	}
+}
+
+// TestTransfer_FlaggedDuringWindow_BlocksAccept: a vehicle that
+// becomes flagged after the seller generates a code must not
+// transfer when the buyer redeems. The pending transfer is
+// cancelled so the stale code can't be retried.
+func TestTransfer_FlaggedDuringWindow_BlocksAccept(t *testing.T) {
+	env := testkit.Setup(t)
+	sellerTok, _, vid, _ := seedSellerWithVehicle(t, env)
+	buyerTok, _ := seedBuyer(t, env)
+	h := build(env)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST",
+		"/v1/citizens/me/vehicles/"+vid.String()+"/transfer",
+		`{"to_contact":"x@x.com"}`, sellerTok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("start: %d %s", rec.Code, rec.Body.String())
+	}
+	_, code, _ := parseTransfer(t, rec.Body.Bytes())
+
+	// Police flags it after the seller already shared the code.
+	env.Exec(`UPDATE vehicles SET is_wanted=true WHERE id=$1`, vid)
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST",
+		"/v1/citizens/me/transfers/accept",
+		`{"code":"`+code+`"}`, buyerTok))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("accept after flag: want 409, got %d %s",
+			rec.Code, rec.Body.String())
+	}
+	// Pending row must be marked cancelled so a buyer can't retry.
+	var status string
+	if err := env.QueryRow(
+		`SELECT status FROM vehicle_transfers WHERE vehicle_id=$1`, vid).
+		Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("transfer status: want cancelled, got %s", status)
+	}
+	// Owner must NOT have flipped.
+	var owner string
+	_ = env.QueryRow(`SELECT COALESCE(owner_id::text,'') FROM vehicles WHERE id=$1`, vid).
+		Scan(&owner)
+	if owner == "" {
+		t.Fatal("owner_id was cleared — should still be the seller's owners row")
+	}
+}
+
+// containsCI is a tiny case-insensitive contains check, kept local
+// so we don't pull in strings just for one assertion.
+func containsCI(haystack, needle string) bool {
+	h := []byte(haystack)
+	n := []byte(needle)
+	for i := 0; i+len(n) <= len(h); i++ {
+		match := true
+		for j := 0; j < len(n); j++ {
+			a, b := h[i+j], n[j]
+			if a >= 'A' && a <= 'Z' { a += 'a' - 'A' }
+			if b >= 'A' && b <= 'Z' { b += 'a' - 'A' }
+			if a != b { match = false; break }
+		}
+		if match { return true }
+	}
+	return false
+}
