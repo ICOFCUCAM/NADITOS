@@ -38,6 +38,9 @@ export default function ProvidersPage() {
       services.anpr("/v1/anpr/health", {
         token: session.accessToken, tenant: session.user.tenant,
       }).catch(() => null),
+      services.fines("/v1/fines/payments/health", {
+        token: session.accessToken, tenant: session.user.tenant,
+      }).catch(() => null),
     ]).then((rs) => {
       setItems(rs.filter(Boolean) as Health[]);
     });
