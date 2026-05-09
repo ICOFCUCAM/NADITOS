@@ -43,8 +43,13 @@ go-tidy: ## Run go mod tidy in every service
 go-build: ## Build every Go service
 	@for s in $(SERVICES); do (cd services/$$s && go build -o ../../bin/$$s ./cmd/server) || exit 1; done
 
-go-test: ## Test every Go service
-	@for s in $(SERVICES); do (cd services/$$s && go test ./...) || exit 1; done
+go-test: ## Test every Go package and service (-race, -count=1, with TEST_DATABASE_URL)
+	@(cd packages/go-common && go test ./... -race -count=1) || exit 1
+	@for s in $(SERVICES); do (cd services/$$s && go test ./... -race -count=1) || exit 1; done
+
+go-vet: ## Vet every Go package and service
+	@(cd packages/go-common && go vet ./...) || exit 1
+	@for s in $(SERVICES); do (cd services/$$s && go vet ./...) || exit 1; done
 
 # ─── Web ────────────────────────────────────────────────────────────────
 web-install: ## pnpm install for all web apps
@@ -57,11 +62,14 @@ web: ## Run all Next.js apps in parallel
 	 wait
 
 # ─── Test / lint ────────────────────────────────────────────────────────
-test: go-test ## Run all tests
+test: go-test ## Run all Go tests (-race)
+
+smoke: ## Run the end-to-end smoke (14 stages, ~30s)
+	@./scripts/smoke.sh
 
 fmt: ## Format Go + TS
 	@for s in $(SERVICES); do (cd services/$$s && gofmt -w .) ; done
 	@for a in $(APPS); do (cd apps/$$a && pnpm format 2>/dev/null || true); done
 
 .PHONY: help up down logs ps migrate migrate-down seed psql \
-        go-tidy go-build go-test web-install web test fmt
+        go-tidy go-build go-test go-vet web-install web test smoke fmt
