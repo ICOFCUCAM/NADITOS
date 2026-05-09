@@ -16,15 +16,39 @@
 
 ## Vercel — frontends
 
-Each app under `apps/<app>` ships a `vercel.json`. From each app
-directory:
+Each app under `apps/<app>` ships a `vercel.json`. The repo is a pnpm
+workspace, so each Vercel project must be configured with a **Root
+Directory** of `apps/<app>` — without it, Vercel runs the install/build
+from the repo root and the per-app `vercel.json` never executes.
+
+### One-time setup per project (admin / police / citizen)
+
+Vercel dashboard → **Add New Project** → import the GitHub repo, then:
+
+1. **Root Directory**: `apps/web-admin` (or `apps/police-pwa` / `apps/web-citizen`)
+2. **Framework Preset**: leave on Next.js (auto-detected from `vercel.json`)
+3. **Environment Variables** (Production scope):
+    - `NEXT_PUBLIC_API_BASE = https://naditos-gateway.fly.dev`
+    - `NEXT_PUBLIC_DEFAULT_TENANT = demo`
+4. Deploy.
+
+### CLI alternative
+
+From each app directory:
 
 ```bash
+cd apps/<app>
 vercel link
 vercel env add NEXT_PUBLIC_API_BASE production
 vercel env add NEXT_PUBLIC_DEFAULT_TENANT production
 vercel deploy --prod
 ```
+
+### Changing env vars
+
+`NEXT_PUBLIC_*` values are inlined at build time. After changing an env
+var, redeploy with **"Use existing Build Cache"** UNCHECKED — otherwise
+the old value stays in the bundle.
 
 Environment variables required per app:
 
