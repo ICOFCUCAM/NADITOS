@@ -22,7 +22,7 @@ enforcement, and fine management.
 | Digital Fines         | `fines`          | implemented |
 | ANPR Gateway          | `anpr-gateway`   | implemented |
 | Audit Log             | `audit`          | implemented |
-| Notifications         | `notifications`  | scaffold    |
+| Notifications         | `notifications`  | implemented |
 | API gateway           | `gateway`        | implemented |
 
 ## Apps
@@ -86,6 +86,26 @@ db/migrations/       SQL migrations (golang-migrate compatible)
 deploy/              Dockerfiles, K8s manifests, Vercel configs
 docs/                Architecture, security, roadmap, deploy
 ```
+
+## Testing
+
+End-to-end smoke covers all 9 services + the gateway in 14 stages
+ending with a fresh audit-chain verify:
+
+```bash
+DATABASE_URL=postgres://naditos:naditos@localhost:5432/naditos?sslmode=disable \
+  ./scripts/smoke.sh
+```
+
+The smoke script provisions users, exercises ANPR ingest with both
+clean and flagged vehicles, issues + pays + disputes fines, runs the
+demerit→suspend→reinstate loop, transfers a vehicle citizen-to-citizen,
+fires the evidence-retention reaper, and re-verifies the audit chain
+end-to-end.
+
+Go unit + integration tests run with `-race` in CI alongside
+`govulncheck`. Every package in `packages/go-common` and every
+service has direct test coverage.
 
 ## License
 
