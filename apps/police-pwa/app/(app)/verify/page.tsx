@@ -2,21 +2,16 @@
 
 // Roadside driver-license verification.
 //
-// Flow: citizen presents a QR/NFC token (issued via
-// POST /v1/licenses/{id}/issue-token in the citizen portal). The
-// officer pastes / scans the token here, we POST it to
-// /v1/licenses/verify, and render the standing card.
-//
-// `standing` comes from v_driver_standing in the license service:
-//   "good"        — no active suspension, no recent demerits over threshold
-//   "watch"       — recent demerits but still under threshold
-//   "suspended"   — active driver_suspension row (license is invalid)
-//
-// Any non-"good" result must be visually loud. Officers run this from
-// the side of the road with bright sun on the screen.
+// Citizen presents a QR/NFC token; we POST to /v1/licenses/verify
+// and render a sun-readable standing card. Three states map 1-to-1
+// to a green / amber / red command-center light, with a fallback
+// for permanent suspension that overrides the colour.
 
 import { useState } from "react";
-import { Button, Input, services, useSession } from "@naditos/web-common";
+import {
+  Button, Card, EmptyState, Field, IconButton, Input, KeyValue, Mono,
+  Pill, SectionHeader, services, useSession,
+} from "@naditos/web-common";
 
 type License = {
   id: string;
@@ -34,18 +29,6 @@ type Standing = {
   license: License;
   standing: "good" | "watch" | "suspended";
   recent_violations: number;
-};
-
-const STANDING_TONE: Record<Standing["standing"], string> = {
-  good:      "bg-emerald-900/50 border-emerald-700 text-emerald-200",
-  watch:     "bg-amber-900/50 border-amber-700 text-amber-200",
-  suspended: "bg-red-900/50 border-red-700 text-red-200",
-};
-
-const STANDING_LABEL: Record<Standing["standing"], string> = {
-  good:      "VALID",
-  watch:     "WATCH",
-  suspended: "SUSPENDED",
 };
 
 export default function VerifyPage() {
@@ -68,8 +51,6 @@ export default function VerifyPage() {
       });
       setResult(r as Standing);
     } catch (e: any) {
-      // 400 bad_token / 403 wrong tenant / 404 license unknown — all
-      // map to "could not verify". Officer falls back to manual ID.
       setErr(e?.message ?? "Verification failed");
     } finally {
       setBusy(false);
@@ -77,43 +58,93 @@ export default function VerifyPage() {
   }
 
   return (
-    <div className="p-4 space-y-4">
-      <div className="space-y-2">
-        <label className="block text-xs uppercase tracking-wide text-slate-400">
-          Driver license token
-        </label>
-        <Input
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="paste from citizen QR / NFC"
-          className="bg-slate-800 border-slate-700 text-white font-mono"
-        />
-        <Button
-          onClick={verify} disabled={!token.trim() || busy}
-          className="w-full bg-emerald-600 hover:bg-emerald-700">
-          {busy ? "Verifying…" : "Verify license"}
-        </Button>
-        {err && <p className="text-sm text-red-400">{err}</p>}
+    <div className="px-4 pt-4 space-y-4">
+      <SectionHeader
+        eyebrow="Roadside check"
+        title="Verify driver"
+        description="Paste / scan the citizen's license token. The system
+                     returns issuing-authority-signed standing." />
+
+      <Card pad="md" tone="elevated">
+        <Field label="Driver license token"
+          hint="From the citizen's My License screen — QR, NFC, or shared text.">
+          <div className="flex gap-2">
+            <Input
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="NADITOS-LIC-ey…"
+              inputSize="lg"
+              autoCorrect="off" spellCheck={false} autoCapitalize="off"
+              style={{ fontFamily: "var(--ff-mono)" }}
+            />
+            <IconButton label="Run verification" tone="primary" size="lg"
+              disabled={!token.trim() || busy} onClick={verify}>
+              <ArrowRight />
+            </IconButton>
+          </div>
+        </Field>
+        {err && <p className="mt-2 text-sm text-[var(--c-bad-300)]">{err}</p>}
+      </Card>
+
+      {!result && !err && !busy && (
+        <Card tone="outline" pad="md">
+          <EmptyState
+            title="Awaiting a token"
+            description="Token verification confirms the license was issued
+                         by this jurisdiction and is currently active." />
+        </Card>
+      )}
+
+      {result && <StandingCard r={result} />}
+    </div>
+  );
+}
+
+function StandingCard({ r }: { r: Standing }) {
+  const tone = r.standing === "good" ? "green" : r.standing === "watch" ? "amber" : "red";
+  const TONE_CLS =
+    tone === "green" ? "bg-[var(--status-ok-bg)]   ring-[var(--c-ok-500)]" :
+    tone === "amber" ? "bg-[var(--status-warn-bg)] ring-[var(--c-warn-500)]" :
+                       "bg-[var(--status-bad-bg)]  ring-[var(--c-bad-500)]";
+  const LABEL = r.standing === "good" ? "VALID" : r.standing === "watch" ? "WATCH" : "SUSPENDED";
+
+  return (
+    <div className={`rounded-[var(--r-xl)] ring-1 ${TONE_CLS} p-5 space-y-4`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--fg-muted)]">License</div>
+          <div className="text-2xl mt-0.5"><Mono>{r.license.license_number}</Mono></div>
+          <div className="text-base text-[var(--fg-primary)] mt-1">{r.license.full_name}</div>
+        </div>
+        <div className={
+          "inline-flex items-center rounded-[var(--r-pill)] " +
+          "px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.18em] ring-1 " +
+          (tone === "green" ? "bg-[var(--c-ok-500)] text-[#02150c] ring-[var(--c-ok-500)]" :
+           tone === "amber" ? "bg-[var(--c-warn-500)] text-[#1a1100] ring-[var(--c-warn-500)]" :
+                              "bg-[var(--c-bad-500)] text-white ring-[var(--c-bad-500)]")
+        }>
+          ● {LABEL}
+        </div>
       </div>
 
-      {result && (
-        <div className={`rounded-lg p-4 space-y-2 border ${STANDING_TONE[result.standing]}`}>
-          <div className="flex items-center justify-between">
-            <div className="text-2xl font-mono">{result.license.license_number}</div>
-            <span className="text-sm font-bold tracking-wider">
-              {STANDING_LABEL[result.standing]}
-            </span>
-          </div>
-          <div className="text-sm text-slate-200">{result.license.full_name}</div>
-          <div className="grid grid-cols-2 gap-2 text-xs text-slate-300">
-            <div>Classes: <span className="font-mono">{result.license.classes.join(", ") || "—"}</span></div>
-            <div>Points: <span className="font-mono">{result.license.points}</span></div>
-            <div>Issued: <span className="font-mono">{date(result.license.issued_at)}</span></div>
-            <div>Expires: <span className="font-mono">{date(result.license.expires_at)}</span></div>
-            <div>Recent violations: <span className="font-mono">{result.recent_violations}</span></div>
-            {result.license.is_suspended && (
-              <div>Suspended until: <span className="font-mono">{date(result.license.suspended_until)}</span></div>
-            )}
+      <div className="grid grid-cols-2 gap-3 pt-1">
+        <KeyValue k="Classes" mono v={r.license.classes.join(", ") || "—"} />
+        <KeyValue k="Demerit points" v={r.license.points} />
+        <KeyValue k="Issued"  v={date(r.license.issued_at)} />
+        <KeyValue k="Expires" v={date(r.license.expires_at)} />
+        <KeyValue k="Recent violations" v={r.recent_violations} />
+        {r.license.is_suspended && (
+          <KeyValue k="Suspended until" v={date(r.license.suspended_until)} />
+        )}
+      </div>
+
+      {r.standing === "suspended" && (
+        <div className="rounded-[var(--r-md)] bg-black text-white ring-1 ring-white/20 px-3 py-2.5
+                        flex items-start gap-2">
+          <span aria-hidden className="text-base leading-none">⚠</span>
+          <div className="text-sm">
+            License is suspended. The holder is not authorised to operate
+            a motor vehicle.
           </div>
         </div>
       )}
@@ -123,4 +154,13 @@ export default function VerifyPage() {
 
 function date(s?: string | null) {
   return s ? new Date(s).toISOString().slice(0, 10) : "—";
+}
+
+function ArrowRight() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+         strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+      <path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>
+    </svg>
+  );
 }
