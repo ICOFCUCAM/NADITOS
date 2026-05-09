@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { services, useSession, Pill } from "@naditos/web-common";
 
@@ -21,7 +22,8 @@ export default function RecentPage() {
       <h1 className="text-xl font-bold">Recent fines</h1>
       {items.length === 0 && <p className="text-slate-400 text-sm">No fines issued yet.</p>}
       {items.map((f) => (
-        <div key={f.id} className="rounded-lg bg-slate-800 p-3">
+        <Link key={f.id} href={`/fine/${f.id}`}
+              className="block rounded-lg bg-slate-800 p-3 hover:bg-slate-700 transition">
           <div className="flex justify-between">
             <div className="font-mono">{f.plate}</div>
             <Pill tone={f.status === "paid" ? "green" : "amber"}>{f.status}</Pill>
@@ -29,7 +31,7 @@ export default function RecentPage() {
           <div className="text-sm text-slate-300">{f.offence_code}</div>
           <div className="text-sm">{f.amount} {f.currency}</div>
           <div className="text-xs text-slate-400">{new Date(f.issued_at).toLocaleString()}</div>
-        </div>
+        </Link>
       ))}
     </div>
   );

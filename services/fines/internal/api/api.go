@@ -482,8 +482,10 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, err)
 		return
 	}
-	// Authz: admin/court (fines:read) OR the citizen who owns it.
-	if ownerOK != "yes" {
+	// Authz: admin/court (fines:read) OR the citizen who owns it OR
+	// the officer who issued it. Officers need to see their own work
+	// product on /recent in the PWA without holding admin perms.
+	if ownerOK != "yes" && f.IssuedBy.String() != c.Subject {
 		hasRead := false
 		for _, p := range c.Permissions {
 			if p == "fines:read" {

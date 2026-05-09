@@ -840,6 +840,42 @@ func TestGet_OwnerCanRead_NonOwner403(t *testing.T) {
 	}
 }
 
+// TestGet_IssuingOfficerCanRead: the officer who issued the fine can
+// GET /v1/fines/{id} without fines:read. The /recent screen on the
+// police PWA depends on this — officers need to tap into their own
+// work product to see status / evidence / custody.
+func TestGet_IssuingOfficerCanRead(t *testing.T) {
+	env := testkit.Setup(t)
+	_, plate := newVehicle(t, env)
+	officerTok, _ := env.Token("officer", "fines:create")
+	otherOfficerTok, _ := env.Token("officer", "fines:create")
+
+	h := build(env)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("POST", "/v1/fines",
+		validIssueBody(plate, "INS_EXPIRED"), officerTok))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("issue: %d %s", rec.Code, rec.Body.String())
+	}
+	var issued struct{ ID string `json:"id"` }
+	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
+
+	// Issuing officer can read.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/fines/"+issued.ID, "", officerTok))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("issuer GET: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A different officer (no fines:read, no ownership, didn't issue
+	// this fine) cannot.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, env.Req("GET", "/v1/fines/"+issued.ID, "", otherOfficerTok))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("other officer GET: want 403, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestPaymentsHealth_RecordsOK: a successful pay call against the
 // dev-stub provider must register an OK on the per-tenant
 // HealthMonitor, and GET /v1/fines/payments/health must surface it
