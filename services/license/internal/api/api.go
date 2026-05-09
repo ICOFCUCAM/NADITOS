@@ -51,21 +51,21 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	// Endorsements
 	mux.Handle("POST /v1/licenses/{id}/endorsements",
 		issuer.Middleware(auth.RequirePermission("license:write")(http.HandlerFunc(a.addEndorsement))))
-	mux.Handle("GET  /v1/licenses/{id}/endorsements",
+	mux.Handle("GET /v1/licenses/{id}/endorsements",
 		issuer.Middleware(auth.RequirePermission("license:read")(http.HandlerFunc(a.listEndorsements))))
 
 	// Suspensions
 	mux.Handle("POST /v1/licenses/{id}/suspensions",
 		issuer.Middleware(auth.RequirePermission("license:write")(http.HandlerFunc(a.addSuspension))))
-	mux.Handle("GET  /v1/licenses/{id}/suspensions/active",
+	mux.Handle("GET /v1/licenses/{id}/suspensions/active",
 		issuer.Middleware(auth.RequirePermission("license:read")(http.HandlerFunc(a.activeSuspension))))
 	mux.Handle("POST /v1/licenses/{id}/suspensions/{sid}/lift",
 		issuer.Middleware(auth.RequirePermission("license:write")(http.HandlerFunc(a.liftSuspension))))
 
 	// Standing (computed) + violations
-	mux.Handle("GET  /v1/licenses/{id}/standing",
+	mux.Handle("GET /v1/licenses/{id}/standing",
 		issuer.Middleware(http.HandlerFunc(a.standing)))
-	mux.Handle("GET  /v1/licenses/{id}/violations",
+	mux.Handle("GET /v1/licenses/{id}/violations",
 		issuer.Middleware(http.HandlerFunc(a.violations)))
 
 	// Biometric template registration (template stored in HSM/KMS — we keep a hash here).
@@ -82,7 +82,7 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	// Citizen self-service. The handler keys off the JWT subject so a
 	// citizen cannot read another driver's license without a separate
 	// permission check — RLS plus the user_id filter gates it.
-	mux.Handle("GET  /v1/citizens/me/license",
+	mux.Handle("GET /v1/citizens/me/license",
 		issuer.Middleware(http.HandlerFunc(a.myLicense)))
 
 	return mux

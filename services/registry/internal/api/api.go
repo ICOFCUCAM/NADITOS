@@ -34,32 +34,32 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 
 	root := http.NewServeMux()
 	// Vehicles
-	root.Handle("GET  /v1/vehicles",                issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.list))))
+	root.Handle("GET /v1/vehicles",                issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.list))))
 	root.Handle("POST /v1/vehicles",                issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.create))))
-	root.Handle("GET  /v1/vehicles/{id}",           issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.get))))
+	root.Handle("GET /v1/vehicles/{id}",           issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.get))))
 	root.Handle("PATCH /v1/vehicles/{id}",          issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.update))))
-	root.Handle("GET  /v1/vehicles/by-plate/{plate}", issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.byPlate))))
+	root.Handle("GET /v1/vehicles/by-plate/{plate}", issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.byPlate))))
 	root.Handle("POST /v1/vehicles/{id}/flags",     issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.setFlags))))
 
 	// Owners (admin)
 	root.Handle("POST /v1/owners",                  issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.createOwner))))
-	root.Handle("GET  /v1/owners",                  issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.listOwners))))
-	root.Handle("GET  /v1/owners/{id}",             issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.getOwner))))
+	root.Handle("GET /v1/owners",                  issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.listOwners))))
+	root.Handle("GET /v1/owners/{id}",             issuer.Middleware(auth.RequirePermission("registry:read")(http.HandlerFunc(a.getOwner))))
 	root.Handle("PATCH /v1/owners/{id}",            issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.updateOwner))))
 	root.Handle("POST /v1/owners/{id}/vehicles/{vid}", issuer.Middleware(auth.RequirePermission("registry:write")(http.HandlerFunc(a.linkVehicle))))
 
 	// Citizen self-service. The route is gated by 'owners:self' so a
 	// regular browse-only citizen JWT can't claim ownership without it.
 	root.Handle("POST /v1/citizens/me/owner",       issuer.Middleware(auth.RequirePermission("owners:self")(http.HandlerFunc(a.selfClaimOwner))))
-	root.Handle("GET  /v1/citizens/me/owner",       issuer.Middleware(http.HandlerFunc(a.getMyOwner)))
-	root.Handle("GET  /v1/citizens/me/vehicles",    issuer.Middleware(http.HandlerFunc(a.myVehicles)))
+	root.Handle("GET /v1/citizens/me/owner",       issuer.Middleware(http.HandlerFunc(a.getMyOwner)))
+	root.Handle("GET /v1/citizens/me/vehicles",    issuer.Middleware(http.HandlerFunc(a.myVehicles)))
 	// Citizen-to-citizen vehicle ownership transfer. The seller starts
 	// the transfer; the buyer accepts with the returned code. Existing
 	// fines stay attached to the seller — only future responsibility
 	// shifts.
 	root.Handle("POST /v1/citizens/me/vehicles/{vid}/transfer",
 		issuer.Middleware(http.HandlerFunc(a.startTransfer)))
-	root.Handle("GET  /v1/citizens/me/transfers",
+	root.Handle("GET /v1/citizens/me/transfers",
 		issuer.Middleware(http.HandlerFunc(a.listMyTransfers)))
 	root.Handle("POST /v1/citizens/me/transfers/{id}/cancel",
 		issuer.Middleware(http.HandlerFunc(a.cancelTransfer)))

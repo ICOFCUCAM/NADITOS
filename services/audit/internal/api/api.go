@@ -45,21 +45,21 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
 	mux := http.NewServeMux()
 	// audit log
 	mux.HandleFunc("POST /v1/audit/events", a.write)
-	mux.HandleFunc("GET  /v1/audit/events", a.list)
-	mux.HandleFunc("GET  /v1/audit/verify", a.verify)
+	mux.HandleFunc("GET /v1/audit/events", a.list)
+	mux.HandleFunc("GET /v1/audit/verify", a.verify)
 	// officer analytics — admin only
-	mux.Handle("GET  /v1/audit/officers/stats",
+	mux.Handle("GET /v1/audit/officers/stats",
 		issuer.Middleware(auth.RequirePermission("audit:read")(http.HandlerFunc(a.officerStats))))
 	mux.Handle("POST /v1/audit/officers/stats:rebuild",
 		issuer.Middleware(auth.RequirePermission("audit:read")(http.HandlerFunc(a.rebuildStats))))
 	// Officer self-service: my own daily stats. Officers don't hold
 	// audit:read (admin-only); this view is gated by fines:create
 	// (every officer holds it) and filters to their own user_id.
-	mux.Handle("GET  /v1/audit/officers/me/stats",
+	mux.Handle("GET /v1/audit/officers/me/stats",
 		issuer.Middleware(auth.RequirePermission("fines:create")(http.HandlerFunc(a.myOfficerStats))))
 	// alerts surface — also gated behind audit:read since alerts can
 	// reveal which officers are under suspicion.
-	mux.Handle("GET  /v1/audit/alerts",
+	mux.Handle("GET /v1/audit/alerts",
 		issuer.Middleware(auth.RequirePermission("audit:read")(http.HandlerFunc(a.listAlerts))))
 	mux.Handle("POST /v1/audit/alerts/{id}/resolve",
 		issuer.Middleware(auth.RequirePermission("audit:read")(http.HandlerFunc(a.resolveAlert))))

@@ -37,7 +37,7 @@ func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool) http.Handler 
 	mux.HandleFunc("POST /v1/auth/login",   a.handleLogin)
 	mux.HandleFunc("POST /v1/auth/refresh", a.handleRefresh)
 	mux.HandleFunc("POST /v1/auth/logout",  a.handleLogout)
-	mux.HandleFunc("GET  /v1/auth/me",      a.handleMe)
+	mux.HandleFunc("GET /v1/auth/me",      a.handleMe)
 	mux.HandleFunc("POST /v1/admin/users",  a.handleAdminCreateUser)
 	return mux
 }

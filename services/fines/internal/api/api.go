@@ -68,28 +68,28 @@ func New(cfg config.Service, log *slog.Logger, pool, adminPool *pgxpool.Pool,
 		issuer: issuer, audit: audit, pay: pay, hm: hm, bus: bus, reap: reap}
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:create")(http.HandlerFunc(a.issue))))
-	mux.Handle("GET  /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:read")(http.HandlerFunc(a.list))))
-	mux.Handle("GET  /v1/fines/mine",     issuer.Middleware(http.HandlerFunc(a.listMine)))
+	mux.Handle("GET /v1/fines",          issuer.Middleware(auth.RequirePermission("fines:read")(http.HandlerFunc(a.list))))
+	mux.Handle("GET /v1/fines/mine",     issuer.Middleware(http.HandlerFunc(a.listMine)))
 	// Officer self-listing: fines I personally issued. Officers don't
 	// hold fines:read (that's an admin/court permission) but they need
 	// to be able to see their own issuance history.
-	mux.Handle("GET  /v1/fines/issued-by-me",
+	mux.Handle("GET /v1/fines/issued-by-me",
 		issuer.Middleware(auth.RequirePermission("fines:create")(http.HandlerFunc(a.listIssuedByMe))))
 	// GET /v1/fines/{id} — admin (fines:read) OR citizen who owns it.
 	// The handler enforces the owner branch internally; perm gate is
 	// applied per-request rather than at the route, so the citizen
 	// path doesn't 403 from the middleware before we can check.
-	mux.Handle("GET  /v1/fines/{id}",     issuer.Middleware(http.HandlerFunc(a.get)))
+	mux.Handle("GET /v1/fines/{id}",     issuer.Middleware(http.HandlerFunc(a.get)))
 	mux.Handle("POST /v1/fines/{id}/pay", issuer.Middleware(http.HandlerFunc(a.handlePay)))
 	mux.Handle("POST /v1/fines/{id}/dispute", issuer.Middleware(http.HandlerFunc(a.dispute)))
 	// Admin dispute review surface. fines:cancel is the admin-tier
 	// permission already used by /cancel and the reaper trigger.
-	mux.Handle("GET  /v1/fines/disputes",
+	mux.Handle("GET /v1/fines/disputes",
 		issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.listDisputes))))
 	mux.Handle("POST /v1/fines/{id}/disputes/{did}/resolve",
 		issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.resolveDispute))))
 	mux.Handle("POST /v1/fines/{id}/cancel",  issuer.Middleware(auth.RequirePermission("fines:cancel")(http.HandlerFunc(a.cancel))))
-	mux.Handle("GET  /v1/fines/payments/health",
+	mux.Handle("GET /v1/fines/payments/health",
 		issuer.Middleware(http.HandlerFunc(a.paymentsHealth)))
 	// Admin-only synchronous reaper trigger. The background sweep runs
 	// every 6h; ops staff need a way to force a sweep without restarting
