@@ -100,8 +100,8 @@ export default function MyVehiclesPage() {
               </span>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-500">
-              <div>Insurance: <span className="text-slate-800">{date(v.insurance_expires_at)}</span></div>
-              <div>Inspection: <span className="text-slate-800">{date(v.inspection_expires_at)}</span></div>
+              <div>Insurance: {expiryBadge(v.insurance_expires_at)}</div>
+              <div>Inspection: {expiryBadge(v.inspection_expires_at)}</div>
             </div>
             {v.is_stolen && <Pill tone="black">stolen</Pill>}
 
@@ -165,4 +165,31 @@ export default function MyVehiclesPage() {
 
 function date(s?: string | null) {
   return s ? new Date(s).toISOString().slice(0, 10) : "—";
+}
+
+// expiryBadge renders an expiry timestamp with urgency colour. The
+// citizen sees at a glance whether they need to renew:
+//   • not on file or already past → red
+//   • <= 30 days remaining → amber
+//   • > 30 days remaining → green
+function expiryBadge(s?: string | null) {
+  if (!s) return <span className="text-red-700 font-medium">not on file</span>;
+  const exp = new Date(s);
+  const days = Math.floor((exp.getTime() - Date.now()) / 86400_000);
+  const dateStr = exp.toISOString().slice(0, 10);
+  if (days < 0) {
+    return (
+      <span className="text-red-700 font-medium">
+        {dateStr} (expired {Math.abs(days)}d ago)
+      </span>
+    );
+  }
+  if (days <= 30) {
+    return (
+      <span className="text-amber-700 font-medium">
+        {dateStr} ({days}d left)
+      </span>
+    );
+  }
+  return <span className="text-emerald-700">{dateStr} ({days}d left)</span>;
 }
