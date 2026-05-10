@@ -3,16 +3,20 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/icofcucam/naditos/packages/go-common/audit"
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
@@ -24,14 +28,21 @@ type API struct {
 	log    *slog.Logger
 	pool   *pgxpool.Pool
 	issuer *auth.Issuer
+	// audit is the append-only ledger emitter. Optional — if the
+	// AUDIT_URL env wasn't set the client is nil and emissions are
+	// no-ops. Auth uses audit.EmitRaw because login fires *before*
+	// a JWT exists, so the usual claims-derived actor info isn't
+	// available.
+	audit *audit.Client
 }
 
-func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool) http.Handler {
+func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool, auditc *audit.Client) http.Handler {
 	a := &API{
 		cfg:    cfg,
 		log:    log,
 		pool:   pool,
 		issuer: auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL),
+		audit:  auditc,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/auth/login",   a.handleLogin)
@@ -81,6 +92,7 @@ type tenantConfig struct {
 func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rid, _, _ := observability.IDs(ctx)
+	ip := clientIP(r)
 
 	var req loginReq
 	if err := httpx.ReadJSON(r, &req); err != nil {
@@ -136,6 +148,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		lg.Info("login: user not found")
+		a.emitLoginEvent(ctx, lg, "login.failed", tenant, "", req.Email, ip, "user_not_found")
 		httpx.WriteErr(w, httpx.ErrUnauthorized)
 		return
 	case err != nil:
@@ -144,6 +157,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	case !isActive:
 		lg.Info("login: user inactive", slog.String("user_id", userID.String()))
+		a.emitLoginEvent(ctx, lg, "login.failed", tenant, userID.String(), req.Email, ip, "user_inactive")
 		httpx.WriteErr(w, httpx.ErrUnauthorized)
 		return
 	}
@@ -152,6 +166,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if err := auth.CheckPassword(passwordHash, req.Password); err != nil {
 		lg.Info("login: password mismatch", slog.String("err", err.Error()))
+		a.emitLoginEvent(ctx, lg, "login.failed", tenant, userID.String(), req.Email, ip, "password_mismatch")
 		httpx.WriteErr(w, httpx.ErrUnauthorized)
 		return
 	}
@@ -192,6 +207,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lg.Info("login: success")
+	a.emitLoginEvent(ctx, lg, "login.success", tenant, userID.String(), req.Email, ip, "")
 
 	tcfg, err := a.loadTenantConfig(ctx, tenant)
 	if err != nil {
@@ -575,6 +591,58 @@ func loggerFromCtx(ctx context.Context) *slog.Logger {
 		return v
 	}
 	return slog.Default()
+}
+
+// emitLoginEvent writes a login.success or login.failed entry to the audit
+// ledger. For unknown users, userID is empty and the resource_id is the
+// sha256 of the lowercased email — the same identity-shaped key across
+// repeated probes, which lets the audit service alert on N failures from
+// the same attempted account without needing the cleartext email as the
+// key. The email is still recorded in the After field for forensic value.
+//
+// Audit emission failures are logged at WARN and never affect the caller;
+// the login response is already committed (or about to be) by the time
+// we get here.
+func (a *API) emitLoginEvent(ctx context.Context, lg *slog.Logger, action, tenant, userID, email, ip, reason string) {
+	if a.audit == nil {
+		return
+	}
+	resourceID := userID
+	if resourceID == "" {
+		h := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+		resourceID = "email_sha256:" + hex.EncodeToString(h[:])
+	}
+	after := map[string]string{"email": email, "ip": ip}
+	if reason != "" {
+		after["reason"] = reason
+	}
+	ev := &audit.Event{
+		TenantID:     tenant,
+		ActorUser:    userID,
+		ActorIP:      ip,
+		Service:      "auth",
+		Action:       action,
+		ResourceType: "session",
+		ResourceID:   resourceID,
+		After:        after,
+	}
+	if err := a.audit.EmitRaw(ctx, ev); err != nil {
+		lg.Warn("audit emit failed",
+			slog.String("action", action), slog.String("err", err.Error()))
+	}
+}
+
+// clientIP returns the request's originating IP. Honors a single
+// X-Forwarded-For hop (the gateway, in this deployment) before falling
+// back to RemoteAddr.
+func clientIP(r *http.Request) string {
+	if v := r.Header.Get("X-Forwarded-For"); v != "" {
+		if i := strings.IndexByte(v, ','); i >= 0 {
+			return strings.TrimSpace(v[:i])
+		}
+		return strings.TrimSpace(v)
+	}
+	return r.RemoteAddr
 }
 
 func pickPrimary(roles []string) string {
