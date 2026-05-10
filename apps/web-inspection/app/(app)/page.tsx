@@ -11,12 +11,15 @@ import {
 // its numbers from the registry (the source of truth for vehicle
 // compliance state):
 //
-//   GET /v1/vehicles            — flagged vehicles, status counts
-//   GET /v1/vehicles?flagged=1  — only red/black entries
+//   GET /v1/vehicles  — full list, with computed `status` per row
 //
-// When the inspection service grows a /v1/inspection/queue endpoint
-// (scheduled appointments at this station), wire it in alongside the
-// registry data.
+// Counts are derived client-side from the per-row `status` field
+// (green / yellow / red / black) computed by the v_vehicle_status
+// view, plus inspection_expires_at for due-soon and overdue.
+// We deliberately don't use ?flagged=1 because that filter only
+// catches stolen/seized/wanted (black) — a vehicle with expired
+// insurance and inspection is "red" but not flagged in that narrow
+// sense, and the inspection dashboard wants both.
 
 type Vehicle = {
   id: string;
@@ -30,22 +33,20 @@ type Vehicle = {
 export default function InspectionHome() {
   const { session } = useSession();
   const [vehicles, setVehicles] = useState<Vehicle[] | null>(null);
-  const [flagged, setFlagged] = useState<Vehicle[] | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!session) return;
     setLoading(true);
-    const auth = { token: session.accessToken, tenant: session.user.tenant };
-    Promise.all([
-      services.registry(`/v1/vehicles`,         auth).catch(() => null) as Promise<{ items: Vehicle[] } | null>,
-      services.registry(`/v1/vehicles?flagged=1`, auth).catch(() => null) as Promise<{ items: Vehicle[] } | null>,
-    ]).then(([all, flag]) => {
-      setVehicles(all?.items ?? []);
-      setFlagged(flag?.items ?? []);
-    }).finally(() => setLoading(false));
+    services.registry(`/v1/vehicles`, {
+      token: session.accessToken, tenant: session.user.tenant,
+    })
+      .then((r: any) => setVehicles(r?.items ?? []))
+      .catch(() => setVehicles([]))
+      .finally(() => setLoading(false));
   }, [session]);
 
+  const flagged = (vehicles ?? []).filter((v) => v.status === "red" || v.status === "black");
   const dueSoon = (vehicles ?? []).filter((v) => {
     if (!v.inspection_expires_at) return false;
     const t = new Date(v.inspection_expires_at).getTime();
@@ -73,7 +74,7 @@ export default function InspectionHome() {
         <Stat label="Overdue"
               value={loading ? <Skeleton className="h-4 w-16 inline-block" /> : overdue.length} />
         <Stat label="Flagged (red/black)"
-              value={loading ? <Skeleton className="h-4 w-16 inline-block" /> : (flagged?.length ?? "—")} />
+              value={loading ? <Skeleton className="h-4 w-16 inline-block" /> : flagged.length} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
