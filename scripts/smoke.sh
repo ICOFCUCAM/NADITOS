@@ -43,6 +43,23 @@ mkdir -p "$LOG_DIR"
 
 PIDS=()
 cleanup() {
+  local rc=$?
+  # On failure dump the last 40 lines of every service's log so a CI
+  # operator who only sees the workflow output can still root-cause
+  # without re-running. Skip on clean exit so green runs stay quiet.
+  if [ "$rc" -ne 0 ]; then
+    echo
+    echo "═════════════════════════════════════════════════════════"
+    echo "  smoke failed (exit $rc) — dumping service logs"
+    echo "─────────────────────────────────────────────────────────"
+    for f in "$LOG_DIR"/*.log; do
+      [ -f "$f" ] || continue
+      echo
+      echo "── $(basename "$f" .log) ──"
+      tail -40 "$f"
+    done
+    echo "═════════════════════════════════════════════════════════"
+  fi
   echo "→ stopping services"
   for pid in "${PIDS[@]:-}"; do
     [ -z "$pid" ] && continue
