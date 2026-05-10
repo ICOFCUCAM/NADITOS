@@ -83,6 +83,25 @@ echo "→ apply migrations"
 DATABASE_URL="$DATABASE_URL" "$ROOT/scripts/migrate.sh" up >"$LOG_DIR/migrate.log" 2>&1
 
 # ─── 2. start services ──────────────────────────────────────────────────
+#
+# CI's 7GB runner can't host 9 concurrent `go run` invocations during
+# initial module download + compile — peak memory routinely OOM-kills
+# one of the children, which surfaces as a bash "Killed" line and the
+# smoke fails before health-check time. Pre-build sequentially so the
+# heavy memory cost is paid once per service in series; the resulting
+# binaries are tiny at runtime.
+echo "→ pre-building service binaries"
+BIN_DIR="$LOG_DIR/bin"
+mkdir -p "$BIN_DIR"
+for pair in audit:audit auth:auth registry:registry license:license \
+            insurance:insurance inspection:inspection fines:fines \
+            anpr-gateway:anpr-gateway notifications:notifications; do
+  name=${pair%%:*}
+  echo "  ↳ $name"
+  (cd "services/$name" && go build -trimpath -o "$BIN_DIR/$name" ./cmd/server) \
+    || { echo "✗ build failed for $name"; exit 1; }
+done
+
 start() {
   local name=$1 port=$2 dir=$3
   echo "→ starting $name on $port"
@@ -93,7 +112,7 @@ start() {
     SERVICE_PORT="$port" \
     AUDIT_URL="http://localhost:8007" \
     LOG_LEVEL="${LOG_LEVEL:-info}" \
-    go run ./cmd/server >"$LOG_DIR/$name.log" 2>&1
+    "$BIN_DIR/$name" >"$LOG_DIR/$name.log" 2>&1
   ) &
   PIDS+=("$!")
 }
