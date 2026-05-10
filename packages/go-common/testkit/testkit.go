@@ -262,8 +262,12 @@ func randHex(n int) string {
 // seedTenant writes the minimal rows every test relies on.
 func seedTenant(t *testing.T, e *Env) {
 	t.Helper()
+	// The test plate regex is intentionally permissive: tests build
+	// plates like "TFR-<uuid[:6]>" and uuid hex includes lowercase,
+	// so [A-Z0-9-] would reject every dynamic plate the test helpers
+	// produce. Production country packs lock this down per-jurisdiction.
 	e.Exec(`INSERT INTO tenants (id, name, country_code, default_locale, currency, plate_regex)
-	         VALUES ($1, 'Test Tenant', 'XX', 'en', 'EUR', '^[A-Z0-9-]{2,10}$')
+	         VALUES ($1, 'Test Tenant', 'XX', 'en', 'EUR', '^[A-Za-z0-9-]{2,15}$')
 	         ON CONFLICT (id) DO NOTHING`, e.Tenant)
 
 	for _, r := range []struct{ Code, Name string }{
@@ -310,7 +314,7 @@ func seedTenant(t *testing.T, e *Env) {
 	e.Exec(`INSERT INTO country_packs (id, country_code, version, effective_from, manifest)
 	         VALUES ($1::text, 'XX', '1.0', '2026-01-01',
 	           jsonb_build_object('id', $1::text, 'country_code','XX','version','1.0',
-	             'plate_regex','^[A-Z0-9-]{2,10}$', 'currency','EUR',
+	             'plate_regex','^[A-Za-z0-9-]{2,15}$', 'currency','EUR',
 	             'offences', jsonb_build_array(
 	                jsonb_build_object('code','INS_EXPIRED',  'points', 4),
 	                jsonb_build_object('code','INSP_EXPIRED', 'points', 2),

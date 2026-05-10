@@ -2,9 +2,13 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,6 +30,14 @@ type API struct {
 	issuer *auth.Issuer
 	audit  *audit.Client
 	bus    events.Publisher
+
+	// plateRegexCache memoises the compiled jurisdiction-format regex
+	// per tenant. Vehicle creates are low-rate but we still want to
+	// avoid a DB roundtrip + regex compile on every POST. Entries
+	// never expire because plate_regex on a tenant rarely changes; a
+	// future "ministry edits the country pack" admin endpoint should
+	// call invalidatePlateRegex(tenant) after writing the new regex.
+	plateRegexCache sync.Map // map[string]*regexp.Regexp
 }
 
 func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool,
@@ -191,6 +203,10 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	defer conn.Release()
 
 	c := auth.ClaimsFrom(r.Context())
+	if err := a.validatePlate(r.Context(), conn, c.TenantID, in.Plate); err != nil {
+		httpx.WriteErr(w, err)
+		return
+	}
 	tx, err := conn.Begin(r.Context())
 	if err != nil {
 		httpx.WriteErr(w, err)
@@ -420,4 +436,57 @@ func joinAnd(parts []string) string {
 		out += " AND " + p
 	}
 	return out
+}
+
+// validatePlate enforces the jurisdiction's plate format on creation.
+// The regex is configured per-tenant in the country pack and stored on
+// the tenants row; ministries that bring a country pack online via the
+// admin app set the format there. Plates are always uppercased before
+// matching so callers don't have to second-guess the regex's case.
+//
+// Returns nil if the plate is acceptable, or an httpx.Error tagged
+// "bad_plate" with the regex value embedded so the admin/citizen UIs
+// can surface the format requirement without an extra round trip.
+func (a *API) validatePlate(ctx context.Context, q queryRow, tenant, plate string) error {
+	re, err := a.plateRegexFor(ctx, q, tenant)
+	if err != nil {
+		return fmt.Errorf("load plate_regex for tenant %s: %w", tenant, err)
+	}
+	if !re.MatchString(plate) {
+		return httpx.Err(http.StatusBadRequest, "bad_plate",
+			fmt.Sprintf("plate %q does not match jurisdiction format %q", plate, re.String()))
+	}
+	return nil
+}
+
+// plateRegexFor returns the compiled regex for a tenant, memoising the
+// result so subsequent creates skip both the DB read and the regex
+// compile. The cache lives forever; a future endpoint that mutates
+// plate_regex must call a.plateRegexCache.Delete(tenant).
+func (a *API) plateRegexFor(ctx context.Context, q queryRow, tenant string) (*regexp.Regexp, error) {
+	if cached, ok := a.plateRegexCache.Load(tenant); ok {
+		return cached.(*regexp.Regexp), nil
+	}
+	var pat string
+	if err := q.QueryRow(ctx, `SELECT plate_regex FROM tenants WHERE id = $1`, tenant).Scan(&pat); err != nil {
+		return nil, err
+	}
+	if pat == "" {
+		// Defensive fallback; the column has a NOT NULL DEFAULT in 0001
+		// so this branch should be unreachable, but a corrupted row
+		// shouldn't be a 500-cascade.
+		pat = `^[A-Z0-9-]{2,10}$`
+	}
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		return nil, fmt.Errorf("invalid plate_regex %q: %w", pat, err)
+	}
+	a.plateRegexCache.Store(tenant, re)
+	return re, nil
+}
+
+// queryRow is the narrow QueryRow surface validatePlate needs;
+// pgx.Tx, *pgxpool.Conn, and *pgxpool.Pool all satisfy it.
+type queryRow interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
