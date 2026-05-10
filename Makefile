@@ -70,8 +70,11 @@ web: ## Run all Next.js apps in parallel (dev mode)
 # ─── Test / lint ────────────────────────────────────────────────────────
 test: go-test ## Run all Go tests (-race)
 
-smoke: ## Run the end-to-end smoke (14 stages, ~30s)
+smoke: ## Run the end-to-end smoke (local services, 14 stages, ~30s)
 	@./scripts/smoke.sh
+
+remote-smoke: ## Smoke-test the live gateway (set API= to override, default https://naditos-gateway.fly.dev)
+	@./scripts/remote-smoke.sh
 
 # `make check` is the local equivalent of CI's pre-merge gate. Run it
 # before opening a PR — if it's green here it'll be green in GitHub
@@ -88,4 +91,4 @@ fmt: ## Format Go + TS
 .PHONY: help up down logs ps migrate migrate-down seed psql \
         go-tidy go-build go-test go-vet \
         web-install web-build web-typecheck web \
-        test smoke check fmt
+        test smoke remote-smoke check fmt
