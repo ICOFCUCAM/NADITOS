@@ -31,6 +31,11 @@ cd "$ROOT"
 
 DATABASE_URL="${DATABASE_URL:-postgres://naditos:naditos@localhost:5432/naditos?sslmode=disable}"
 JWT_SECRET="${JWT_SECRET:-smoke-secret-do-not-use-anywhere-else-smoke-secret-do-not-use}"
+# After auth started gating /v1/admin/users with ADMIN_BOOTSTRAP_KEY,
+# the bootstrap-users step below 401s without this header. Generate a
+# fresh key per smoke run; export so go-run-spawned services inherit it.
+ADMIN_BOOTSTRAP_KEY="${ADMIN_BOOTSTRAP_KEY:-smoke-bootstrap-$RANDOM-$RANDOM}"
+export ADMIN_BOOTSTRAP_KEY
 TENANT="${TENANT:-demo}"
 LOG_DIR="${LOG_DIR:-/tmp/naditos-smoke}"
 
@@ -113,14 +118,17 @@ wait_health 8009 notifications
 
 H_TENANT=(-H "X-Tenant-Id: $TENANT")
 H_JSON=(-H "Content-Type: application/json")
+# Auth gates /v1/admin/users on this header. Reuse it for every
+# bootstrap call below.
+H_BOOTSTRAP=(-H "X-Admin-Bootstrap-Key: $ADMIN_BOOTSTRAP_KEY")
 
 # ─── 3. bootstrap users ─────────────────────────────────────────────────
 echo "→ bootstrap admin + officer + citizen"
-curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" \
+curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" "${H_BOOTSTRAP[@]}" \
   -d '{"email":"admin@demo","password":"demo1234","full_name":"Demo admin","roles":["admin"]}' >/dev/null
-curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" \
+curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" "${H_BOOTSTRAP[@]}" \
   -d '{"email":"officer@demo","password":"demo1234","full_name":"Demo officer","roles":["officer"]}' >/dev/null
-curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" \
+curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" "${H_BOOTSTRAP[@]}" \
   -d '{"email":"citizen@demo","password":"demo1234","full_name":"Demo citizen","roles":["citizen"]}' >/dev/null
 
 login() {
@@ -481,7 +489,7 @@ echo "  ✓ license.reinstated delivered"
 # notifications consumer + the buyer-side render all work together.
 echo "→ transfer: provision buyer user"
 BUYER_EMAIL="buyer-$(date +%s)@demo"
-curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" \
+curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" "${H_BOOTSTRAP[@]}" \
   -d "{\"email\":\"$BUYER_EMAIL\",\"password\":\"demo1234\",
        \"full_name\":\"Demo buyer\",\"roles\":[\"citizen\"]}" >/dev/null
 

@@ -142,10 +142,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # pnpm/action-setup@v4 errors out when both `version:` and the
+      # `packageManager` field in package.json are set ("multiple
+      # versions of pnpm specified"). We pin pnpm@9.0.0 in
+      # package.json#packageManager, so the action reads from there.
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
-        with: { node-version: 20, cache: pnpm }
+        with:
+          node-version: 20
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r type-check
       - run: pnpm -r build
