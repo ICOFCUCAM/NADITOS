@@ -149,7 +149,7 @@ echo "  ✓ officer + admin + citizen tokens obtained"
 
 # ─── 4. register a non-compliant vehicle ────────────────────────────────
 echo "→ register vehicle with expired insurance"
-PLATE="SMK-$(date +%s)"
+PLATE="SMK-$RANDOM"
 VEH=$(curl -sS -X POST http://localhost:8002/v1/vehicles "${H_TENANT[@]}" "${H_JSON[@]}" \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d "{\"plate\":\"$PLATE\",\"make\":\"Demo\",\"model\":\"X\",\"year\":2020,
@@ -217,7 +217,7 @@ done
 # consumer to materialize an audit_alerts row. Hardens the chain
 # anpr.alert event → event_outbox → consumer → audit_alerts → /audit UI.
 echo "→ ANPR alert: seed a stolen vehicle and scan its plate"
-ALERT_PLATE="STOLEN-$(date +%s)"
+ALERT_PLATE="STN-$RANDOM"
 PGPASSWORD=naditos psql -h localhost -U naditos -d naditos >/dev/null 2>&1 -c \
   "INSERT INTO vehicles (tenant_id, plate, is_stolen)
         VALUES ('$TENANT', '$ALERT_PLATE', true);"
