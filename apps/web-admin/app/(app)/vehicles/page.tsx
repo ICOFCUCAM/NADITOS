@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  Card, Input, Pill, Plate, SectionHeader,
+  Button, Card, Field, Input, Pill, Plate, SectionHeader,
   services, useSession, statusLabel, type VehicleStatus,
 } from "@naditos/web-common";
 
@@ -50,6 +50,8 @@ export default function VehiclesPage() {
         title="Vehicles"
         description="Searchable jurisdiction registry. Toggle Flagged-only to triage operational alerts."
       />
+
+      <NewVehicleForm onCreated={() => setQ((s) => s)} />
 
       <div className="flex flex-wrap items-center gap-3">
         <Input placeholder="Search plate or VIN…" value={q}
@@ -133,4 +135,139 @@ export default function VehiclesPage() {
 function fmt(iso?: string | null) {
   if (!iso) return "—";
   return new Date(iso).toISOString().slice(0, 10);
+}
+
+// NewVehicleForm — minimal create surface that respects the
+// jurisdiction's plate format. The regex ships down with the session
+// (user.tenant_config.plate_regex) so we can mirror the registry's
+// server-side validation here and reject mismatches before the
+// network call. If the regex isn't present (older backend, or the
+// tenant row was missing fields), we accept anything client-side and
+// let the server adjudicate.
+function NewVehicleForm({ onCreated }: { onCreated: () => void }) {
+  const { session } = useSession();
+  const [open, setOpen] = useState(false);
+  const [plate, setPlate] = useState("");
+  const [make, setMake] = useState("");
+  const [model, setModel] = useState("");
+  const [year, setYear] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const regex = session?.user.tenant_config?.plate_regex;
+  const compiled = useMemo(() => {
+    if (!regex) return null;
+    try { return new RegExp(regex); } catch { return null; }
+  }, [regex]);
+
+  const trimmed = plate.trim();
+  const localOk = !compiled || trimmed === "" || compiled.test(trimmed);
+
+  if (!open) {
+    return (
+      <Card pad="md" tone="elevated" className="flex items-center justify-between gap-4">
+        <div className="space-y-0.5">
+          <div className="text-[11px] uppercase tracking-[0.16em] text-[var(--fg-muted)]">
+            Create
+          </div>
+          <div className="text-sm text-[var(--fg-primary)]">Register a new vehicle</div>
+          {regex && (
+            <div className="text-xs text-[var(--fg-muted)]">
+              Plate format for <strong>{session?.user.tenant_config?.country_code ?? session?.user.tenant}</strong>:
+              {" "}<code className="text-[var(--fg-secondary)]">{regex}</code>
+            </div>
+          )}
+        </div>
+        <Button tone="primary" onClick={() => { setOpen(true); setErr(null); }}>
+          New vehicle
+        </Button>
+      </Card>
+    );
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!session) return;
+    if (!trimmed) { setErr("Plate is required."); return; }
+    if (compiled && !compiled.test(trimmed)) {
+      setErr(`Plate does not match jurisdiction format (${regex}).`);
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      const body: Record<string, unknown> = { plate: trimmed };
+      if (make)  body.make = make;
+      if (model) body.model = model;
+      if (year)  body.year = Number(year);
+      await services.registry("/v1/vehicles", {
+        method: "POST", body,
+        token: session.accessToken, tenant: session.user.tenant,
+      });
+      setPlate(""); setMake(""); setModel(""); setYear("");
+      setOpen(false);
+      onCreated();
+    } catch (e: any) {
+      setErr(e?.message ?? "Could not create vehicle.");
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <Card pad="md" tone="elevated">
+      <form onSubmit={submit} className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <div className="text-sm font-medium text-[var(--fg-primary)]">Register a new vehicle</div>
+          <button type="button" onClick={() => { setOpen(false); setErr(null); }}
+            className="text-xs text-[var(--fg-muted)] hover:text-[var(--fg-primary)]">
+            Cancel
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+          <Field label="Plate" error={!localOk ? `Format: ${regex}` : err && err.includes("plate") ? err : undefined}>
+            <Input value={plate}
+              onChange={(e) => setPlate(e.target.value.toUpperCase())}
+              placeholder={regex ? exampleFromRegex(regex) : "ABC-123"}
+              invalid={!localOk}
+              autoFocus required />
+          </Field>
+          <Field label="Make">
+            <Input value={make} onChange={(e) => setMake(e.target.value)} placeholder="e.g. Toyota" />
+          </Field>
+          <Field label="Model">
+            <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="e.g. Hilux" />
+          </Field>
+          <Field label="Year">
+            <Input value={year} onChange={(e) => setYear(e.target.value.replace(/\D/g, ""))}
+              inputMode="numeric" maxLength={4} placeholder={String(new Date().getFullYear())} />
+          </Field>
+        </div>
+
+        {regex && (
+          <div className="text-xs text-[var(--fg-muted)]">
+            Format hint: <code className="text-[var(--fg-secondary)]">{regex}</code>
+          </div>
+        )}
+        {err && !err.toLowerCase().includes("plate") && (
+          <div className="text-xs text-[var(--status-bad-fg)]">{err}</div>
+        )}
+
+        <div className="flex gap-2 pt-1">
+          <Button type="submit" tone="primary" disabled={busy || !trimmed || !localOk}>
+            {busy ? "Saving…" : "Create vehicle"}
+          </Button>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
+// exampleFromRegex turns a permissive regex into a passable placeholder
+// value for the input field. It only handles the common shape we use
+// (^[A-Z0-9-]{2,N}$ and friends) — anything fancier just falls back
+// to a generic "ABC-123".
+function exampleFromRegex(re: string): string {
+  const m = re.match(/\{(\d+),(\d+)\}/);
+  const n = m ? Math.min(Number(m[2]), 8) : 7;
+  return ("ABC-12345").slice(0, Math.max(n, 4));
 }

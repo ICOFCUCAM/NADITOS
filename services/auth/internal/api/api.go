@@ -61,6 +61,20 @@ type meResp struct {
 	FullName    string   `json:"full_name"`
 	Role        string   `json:"role"`
 	Permissions []string `json:"permissions"`
+	// TenantConfig is the jurisdiction-level configuration the
+	// frontend needs to render forms correctly: plate format, currency
+	// for fine amounts, and so on. It's pulled fresh from the tenants
+	// row at login + /me time so a ministry change to e.g. plate_regex
+	// flows to clients on the next session refresh.
+	TenantConfig tenantConfig `json:"tenant_config"`
+}
+
+type tenantConfig struct {
+	Name        string `json:"name"`
+	CountryCode string `json:"country_code"`
+	Locale      string `json:"locale"`
+	Currency    string `json:"currency"`
+	PlateRegex  string `json:"plate_regex"`
 }
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
@@ -179,6 +193,11 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	lg.Info("login: success")
 
+	tcfg, err := a.loadTenantConfig(ctx, tenant)
+	if err != nil {
+		lg.Warn("login: tenant config load failed (continuing)", slog.String("err", err.Error()))
+	}
+
 	httpx.WriteJSON(w, http.StatusOK, tokenResp{
 		AccessToken:  access,
 		RefreshToken: refresh,
@@ -186,6 +205,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		User: meResp{
 			ID: userID.String(), Tenant: tenant, Email: req.Email,
 			FullName: fullName, Role: role, Permissions: perms,
+			TenantConfig: tcfg,
 		},
 	})
 }
@@ -295,10 +315,43 @@ func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, httpx.ErrUnauthorized)
 		return
 	}
+	tcfg, err := a.loadTenantConfig(r.Context(), c.TenantID)
+	if err != nil {
+		// Don't 500 the page; an empty tenant config is degraded but
+		// usable. Log and continue.
+		a.log.Warn("me: tenant config load failed",
+			slog.String("tenant", c.TenantID), slog.String("err", err.Error()))
+	}
 	httpx.WriteJSON(w, http.StatusOK, meResp{
 		ID: c.Subject, Tenant: c.TenantID,
 		Role: c.Role, Permissions: c.Permissions,
+		TenantConfig: tcfg,
 	})
+}
+
+// loadTenantConfig reads jurisdiction-level config (plate_regex,
+// currency, country code, …) from the tenants row. It runs with
+// row_security off so the auth service — which operates across
+// tenants — can read the row regardless of the caller's app session
+// vars.
+func (a *API) loadTenantConfig(ctx context.Context, tenant string) (tenantConfig, error) {
+	var tc tenantConfig
+	conn, err := a.pool.Acquire(ctx)
+	if err != nil {
+		return tc, err
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "SET LOCAL row_security = off"); err != nil {
+		return tc, err
+	}
+	err = conn.QueryRow(ctx,
+		`SELECT name, country_code, default_locale, currency, plate_regex
+		   FROM tenants WHERE id = $1`, tenant).
+		Scan(&tc.Name, &tc.CountryCode, &tc.Locale, &tc.Currency, &tc.PlateRegex)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return tc, nil
+	}
+	return tc, err
 }
 
 // handleAdminCreateUser is the user-creation endpoint used by seed scripts

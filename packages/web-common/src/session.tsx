@@ -16,6 +16,17 @@ export type Session = {
     full_name: string;
     role: string;
     permissions: string[];
+    // Jurisdiction-level config the frontend needs to render forms
+    // correctly. Populated from /v1/auth/login and /v1/auth/me; an
+    // older backend that doesn't yet send this leaves it undefined,
+    // and components fall back to permissive defaults.
+    tenant_config?: {
+      name?: string;
+      country_code?: string;
+      locale?: string;
+      currency?: string;
+      plate_regex?: string;
+    };
   };
 };
 
