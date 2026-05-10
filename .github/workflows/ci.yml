@@ -116,6 +116,40 @@ jobs:
           LOG_LEVEL: warn
         run: ./scripts/smoke.sh
 
+  migrations-roundtrip:
+    name: Migrations up/down roundtrip
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: naditos
+          POSTGRES_USER: naditos
+          POSTGRES_PASSWORD: naditos
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U naditos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql + pg_dump
+        run: |
+          # The ubuntu-latest runner ships postgresql-client-common but not
+          # the matching client version we want for pg_dump output stability.
+          # Pin to 16 so the schema snapshot format doesn't shift with the
+          # base image.
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+      - name: Run roundtrip
+        env:
+          DATABASE_URL: postgres://naditos:naditos@localhost:5432/naditos?sslmode=disable
+          PGPASSWORD: naditos
+        run: |
+          chmod +x scripts/migrate.sh scripts/migrate_roundtrip.sh
+          ./scripts/migrate_roundtrip.sh
+
   govulncheck:
     name: Go vulnerability scan
     runs-on: ubuntu-latest
