@@ -113,8 +113,13 @@ foundation Phase 1 builds *on*, not *toward*.
 - A dedicated `naditos-regulations` service (regulations live in tables read
   by `fines` and `registry`).
 - Centralised observability (Loki / Prometheus / Grafana / OTel collector).
-- CI on `main` (no pre-merge gate; nothing prevents a future PR from
-  reintroducing the double-space-mux bug).
+- **Required** CI gating on `main`. The workflow at
+  `.github/workflows/ci.yml` already runs `go build + vet`, integration
+  tests against a real Postgres, an end-to-end smoke, govulncheck, and
+  per-app `pnpm build` on every PR — but **branch protection isn't
+  enabled**, so a green CI isn't required for merge. Recent merges
+  shipped without waiting for the workflow at all. See
+  `docs/BRANCH-PROTECTION.md` for the one-time UI setup.
 - Branch protection on `main`.
 - Real role taxonomy beyond `admin` / `officer` / `citizen` / `court` —
   no `inspector` / `auditor` / `insurance_partner` roles, so the consoles
@@ -157,7 +162,7 @@ foundation Phase 1 builds *on*, not *toward*.
 | Single shared Postgres = single blast radius | High | Possible | §10 — per-region clusters |
 | `JWT_SECRET` rotation procedure undocumented | High | Possible | §8 — secret management |
 | `ADMIN_BOOTSTRAP_KEY` left enabled forever | Medium | Possible | §8 — rotation runbook |
-| No CI ⇒ regressions ship | Medium | Probable | §9 — CI/CD |
+| CI runs but isn't required for merge ⇒ regressions can ship | Medium | Probable | §9 + docs/BRANCH-PROTECTION.md |
 
 ---
 
@@ -668,7 +673,7 @@ the application layer with audit events for every join.
 | # | Risk | Impact | Likelihood | Phase | Status |
 |---|---|---|---|---|---|
 | 1 | PG cold-start locks the stack | High | Always | Phase 1 task #1 | Open |
-| 2 | No CI ⇒ regressions ship | Medium | High | Phase 1 task #2 | Open |
+| 2 | CI runs but isn't required for merge ⇒ regressions can ship | Medium | High | Phase 1 task #2 (see docs/BRANCH-PROTECTION.md) | Open |
 | 3 | `JWT_SECRET` rotation procedure missing | High | Medium | Phase 1 task #5 | Open |
 | 4 | Stale binary deploys (build cache) | Medium | Medium | Phase 1 task #7 | Mitigated (--no-cache) |
 | 5 | Single Postgres = single blast radius | High | Low | Phase 6 | Accepted for now |
@@ -685,8 +690,9 @@ the application layer with audit events for every join.
 ### This week (engineering)
 
 - [ ] Move `naditos-pg` off auto-stop (`min_machines_running=1` or migrate to MPG)
-- [ ] Add GitHub Actions: `go test ./...` + `pnpm build` per app, gated on `main`
-- [ ] Enable branch protection on `main` (require PR, require status checks)
+- [x] CI workflow exists (`.github/workflows/ci.yml`) — go build/vet, integration, smoke, govulncheck, pnpm build
+- [x] `make check` runs the same gating locally (this PR)
+- [ ] **Enable branch protection on `main`** (one-time UI step — see `docs/BRANCH-PROTECTION.md`)
 - [ ] Stamp git sha into every service's boot log
 - [ ] Document `JWT_SECRET` rotation in `deploy/fly/README.md`
 
