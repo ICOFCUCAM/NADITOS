@@ -119,6 +119,117 @@ importers:
         specifier: ^5.5.3
         version: 5.9.3
 
+  apps/web-compliance:
+    dependencies:
+      '@naditos/web-common':
+        specifier: workspace:*
+        version: link:../../packages/web-common
+      next:
+        specifier: ^14.2.5
+        version: 14.2.35(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      react-dom:
+        specifier: ^18.3.1
+        version: 18.3.1(react@18.3.1)
+    devDependencies:
+      '@types/node':
+        specifier: ^20.14.0
+        version: 20.19.40
+      '@types/react':
+        specifier: ^18.3.3
+        version: 18.3.28
+      '@types/react-dom':
+        specifier: ^18.3.0
+        version: 18.3.7(@types/react@18.3.28)
+      autoprefixer:
+        specifier: ^10.4.19
+        version: 10.5.0(postcss@8.5.14)
+      postcss:
+        specifier: ^8.4.39
+        version: 8.5.14
+      tailwindcss:
+        specifier: ^3.4.6
+        version: 3.4.19
+      typescript:
+        specifier: ^5.5.3
+        version: 5.9.3
+
+  apps/web-inspection:
+    dependencies:
+      '@naditos/web-common':
+        specifier: workspace:*
+        version: link:../../packages/web-common
+      next:
+        specifier: ^14.2.5
+        version: 14.2.35(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      react-dom:
+        specifier: ^18.3.1
+        version: 18.3.1(react@18.3.1)
+    devDependencies:
+      '@types/node':
+        specifier: ^20.14.0
+        version: 20.19.40
+      '@types/react':
+        specifier: ^18.3.3
+        version: 18.3.28
+      '@types/react-dom':
+        specifier: ^18.3.0
+        version: 18.3.7(@types/react@18.3.28)
+      autoprefixer:
+        specifier: ^10.4.19
+        version: 10.5.0(postcss@8.5.14)
+      postcss:
+        specifier: ^8.4.39
+        version: 8.5.14
+      tailwindcss:
+        specifier: ^3.4.6
+        version: 3.4.19
+      typescript:
+        specifier: ^5.5.3
+        version: 5.9.3
+
+  apps/web-insurance:
+    dependencies:
+      '@naditos/web-common':
+        specifier: workspace:*
+        version: link:../../packages/web-common
+      next:
+        specifier: ^14.2.5
+        version: 14.2.35(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      react-dom:
+        specifier: ^18.3.1
+        version: 18.3.1(react@18.3.1)
+    devDependencies:
+      '@types/node':
+        specifier: ^20.14.0
+        version: 20.19.40
+      '@types/react':
+        specifier: ^18.3.3
+        version: 18.3.28
+      '@types/react-dom':
+        specifier: ^18.3.0
+        version: 18.3.7(@types/react@18.3.28)
+      autoprefixer:
+        specifier: ^10.4.19
+        version: 10.5.0(postcss@8.5.14)
+      postcss:
+        specifier: ^8.4.39
+        version: 8.5.14
+      tailwindcss:
+        specifier: ^3.4.6
+        version: 3.4.19
+      typescript:
+        specifier: ^5.5.3
+        version: 5.9.3
+
   packages/web-common:
     dependencies:
       react:
