@@ -22,7 +22,10 @@ func discardLogger() *slog.Logger {
 // across all tenants (login establishes one), so it uses the admin
 // pool — same as the runtime configuration.
 func build(env *testkit.Env) http.Handler {
-	return api.New(env.Cfg, discardLogger(), env.AdminPool())
+	// nil audit client = no-op emission, which is the correct behavior
+	// for tests: we want to exercise the auth flow without coupling to a
+	// real audit service. The EmitRaw nil-receiver guard handles this.
+	return api.New(env.Cfg, discardLogger(), env.AdminPool(), nil)
 }
 
 // seedUser creates a user via /v1/admin/users so we get the same

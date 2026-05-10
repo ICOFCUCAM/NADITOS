@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/icofcucam/naditos/packages/go-common/audit"
 	"github.com/icofcucam/naditos/packages/go-common/config"
 	"github.com/icofcucam/naditos/packages/go-common/db"
 	"github.com/icofcucam/naditos/packages/go-common/logger"
@@ -33,7 +34,14 @@ func main() {
 	}
 	log.Info("auth: db ping ok")
 
-	h := api.New(cfg, log, pool)
+	auditc := audit.New(cfg.AuditURL, "auth")
+	if cfg.AuditURL == "" {
+		log.Warn("auth: AUDIT_URL unset; login events will not be emitted")
+	} else {
+		log.Info("auth: audit client wired", slog.String("audit_url", cfg.AuditURL))
+	}
+
+	h := api.New(cfg, log, pool, auditc)
 	if err := server.Run(ctx, log, "auth", cfg.Port, h); err != nil {
 		log.Error("auth: server exited", slog.String("err", err.Error()))
 	}

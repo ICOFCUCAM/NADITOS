@@ -66,6 +66,28 @@ func (c *Client) Emit(ctx context.Context, action, resourceType, resourceID stri
 		ev.ActorRole = cl.Role
 		ev.ActorDevice = cl.DeviceID
 	}
+	return c.EmitRaw(ctx, &ev)
+}
+
+// EmitRaw posts a fully-constructed event. Use this when the caller
+// can't rely on auth.Claims being in the context — most notably the
+// auth service itself, where login.success and login.failed need to
+// be recorded *before* a JWT exists. The caller is responsible for
+// populating TenantID, ActorUser, etc.
+//
+// The OccurredAt and Service fields are filled in here if the caller
+// left them zero, so a minimal call site only needs to set Action,
+// ResourceType, ResourceID, TenantID, and Before/After.
+func (c *Client) EmitRaw(ctx context.Context, ev *Event) error {
+	if c == nil || c.BaseURL == "" {
+		return nil
+	}
+	if ev.OccurredAt.IsZero() {
+		ev.OccurredAt = time.Now().UTC()
+	}
+	if ev.Service == "" {
+		ev.Service = c.Service
+	}
 	body, err := json.Marshal(ev)
 	if err != nil {
 		return err
