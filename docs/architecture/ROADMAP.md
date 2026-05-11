@@ -11,6 +11,25 @@
 
 ---
 
+## 8 sub-roadmap views (filter index)
+
+The strategic brief asked for 8 named roadmaps. Rather than duplicate
+content across 8 files (which invites drift), each is a *view* into
+this unified roadmap — a filter over the tracks below.
+
+| Sub-roadmap | Tracks that compose it |
+|---|---|
+| Sovereign architecture | 1A · 3A · 3C · 3I |
+| Multinational scaling | 1A · 1B · 3A · 3E · 3H · 3I |
+| Observability | 1C · 1H · 2B · 2G |
+| Deployment hardening | 0 · 1E · 1H · 3I |
+| Frontend maturity | 1B · 2A · 2B · 2C · 2D · 2E · 2F · 2G · 2I |
+| Interoperability | 3C · 3F · 3H · 3K |
+| Anti-corruption intelligence | 1D · 2G · 4 |
+| Long-term infrastructure | every track, sequenced |
+
+---
+
 ## Operating principles (apply to every track)
 
 1. **No new microservices** unless an existing one cannot be reasonably
@@ -146,6 +165,30 @@ here because it is foundational rather than camera-specific:
 - Secret rotation runbook turned into automation (per-service
   re-deploy with new JWT signing key, grace period for old).
 
+### 1H — Enterprise Operations Center
+
+Beyond the observability *substrate* in 1C, the brief calls for an
+**operations center**: not just metrics flowing, but a coordinated
+view of running the platform.
+
+- Incident-management workflow (PagerDuty-class or open equivalent):
+  on-call rotations, escalation policies, post-incident review
+  templates. Integrate Sentry / Alertmanager as sources.
+- Deployment-visibility dashboard: which service, which version,
+  which environment, deployed by whom, when. Links to CI run + diff.
+- Audit-operations visibility: live view of audit-event ingestion
+  rate per service, audit-chain integrity status, alert backlog,
+  unresolved `audit_alerts` queue. Pairs with Track 2G forensic UI.
+- Service-level objectives (SLOs) defined per service with error-
+  budget burn-down dashboards.
+- Operational runbooks linked from alerts (every alert has a "what
+  to do" doc in the repo).
+
+**Why a separate track from 1C:** 1C is plumbing (collect signals).
+1H is the workflow that turns signals into action. Both ship in
+Track 1 because Track 2+ work cannot be operated safely without
+incident management.
+
 **Track 1 exit criteria**
 
 - Jurisdiction hierarchy migrated and used by at least one service
@@ -200,6 +243,12 @@ platform.
 - Garage accreditation lifecycle.
 - Real provider adapter (one to start, e.g. TÜV-shape).
 - Circuit-breaker on failed providers.
+- **Inspection-station offline mode** (`apps/inspection-station`):
+  same offline state machine as the police-pwa in Track 1F. Inspectors
+  in rural / weak-connectivity centers must be able to record defects,
+  capture evidence, and issue conditional/fail outcomes offline, with
+  durable queue + sync-on-reconnect. Brief #4 ("offline-first national
+  operations") explicitly names *both* police and inspection.
 
 ### 2D — Insurance completeness
 
@@ -244,6 +293,21 @@ platform.
 - Evidence-export-to-court bundle (signed PDF + frame manifest +
   custody trail).
 - Legal-hold flag honoured by the retention reaper.
+- **Warrant integration substrate**: `warrants` table (issuer,
+  subject_kind, subject_id, kind: arrest|seizure|stop, status, valid
+  from/until, court_case_id). Officer scan flow surfaces warrant
+  hits the same way it surfaces stolen-vehicle alerts. Service-to-
+  court adapter is stubbed; real adapters land in Track 3 alongside
+  partner-by-partner integration work.
+- **Judicial review pipeline substrate**: `judicial_reviews` table
+  (court_case_id, requested_at, requested_by, reason, status, decided
+  at, decision). Surfaces in the citizen appeal flow when the
+  administrative dispute path is exhausted. Linked to legal-hold so
+  evidence cannot be reaped while a review is open.
+- **Appeals workflow taxonomy**: replace the current `fine_disputes.
+  status` free-string set with a typed enum (administrative |
+  judicial | constitutional) plus per-tenant configuration of which
+  paths are available.
 
 ### 2I — Camera Platform C2 (hotlist overlay)
 
@@ -323,6 +387,13 @@ sooner.
 
 - Fleet schema, freight manifests, road-usage analytics.
 - Taxation snapshot table (tax paid vs road usage).
+- **Emissions intelligence**: `vehicles.emission_class` already
+  exists. Add an emissions ledger that joins emission_class +
+  vehicle category + road-usage analytics into per-region emissions
+  estimates. Pairs with the brief's *environmental monitoring*
+  requirement (smart city #12). Foundation for low-emission-zone
+  enforcement, congestion-charge differentiation, and policy-impact
+  analytics in Track 4.
 
 ### 3H — External API governance
 
