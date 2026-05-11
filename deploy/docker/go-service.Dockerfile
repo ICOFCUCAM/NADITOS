@@ -1,7 +1,7 @@
 # Multi-stage build for any Go service in /services/<SERVICE>.
 # Build context: repository root.
 ARG SERVICE
-FROM golang:1.22-alpine AS build
+FROM golang:1.25-alpine AS build
 ARG SERVICE
 WORKDIR /src
 COPY packages/go-common ./packages/go-common

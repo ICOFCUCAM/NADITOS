@@ -1,9 +1,9 @@
 module github.com/icofcucam/naditos/packages/go-common
 
-go 1.22
+go 1.25
 
 require (
-	github.com/golang-jwt/jwt/v5 v5.2.1
+	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.6.0
 	golang.org/x/crypto v0.24.0
