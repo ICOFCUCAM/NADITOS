@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"runtime/debug"
 	"syscall"
 	"time"
 
+	"github.com/icofcucam/naditos/packages/go-common/buildinfo"
 	"github.com/icofcucam/naditos/packages/go-common/observability"
 )
 
@@ -81,7 +83,22 @@ func recoverMiddleware(log *slog.Logger, service string) func(http.Handler) http
 // Run starts the service on the given port. service is used in access
 // logs and metric labels; it should match the service name (auth,
 // registry, fines, ...).
+//
+// Logs a uniform "boot" line before listening with the git SHA the
+// binary was built from. This is the operator's confirmation that
+// `fly deploy` actually pushed the new image — if the SHA in the boot
+// log doesn't match the one in `git log -1 --oneline` the deploy was
+// stale (build-cache, wrong branch, etc.).
 func Run(ctx context.Context, log *slog.Logger, service string, port int, h http.Handler) error {
+	log.Info("boot",
+		slog.String("service", service),
+		slog.String("git_sha", buildinfo.Short()),
+		slog.String("git_sha_full", buildinfo.Revision()),
+		slog.Time("git_time", buildinfo.Time()),
+		slog.Bool("git_modified", buildinfo.Modified()),
+		slog.Int("port", port),
+		slog.String("go_runtime", runtime.Version()),
+	)
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           Mount(log, service, h),

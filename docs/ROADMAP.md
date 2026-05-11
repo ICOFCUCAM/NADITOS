@@ -691,10 +691,11 @@ the application layer with audit events for every join.
 
 - [ ] Move `naditos-pg` off auto-stop (`min_machines_running=1` or migrate to MPG)
 - [x] CI workflow exists (`.github/workflows/ci.yml`) — go build/vet, integration, smoke, govulncheck, pnpm build
-- [x] `make check` runs the same gating locally (this PR)
-- [ ] **Enable branch protection on `main`** (one-time UI step — see `docs/BRANCH-PROTECTION.md`)
-- [ ] Stamp git sha into every service's boot log
-- [ ] Document `JWT_SECRET` rotation in `deploy/fly/README.md`
+- [x] `make check` runs the same gating locally
+- [x] **Branch protection on `main`** — runbook in `docs/BRANCH-PROTECTION.md`; enabled in the GitHub UI as of this commit window
+- [x] Stamp git sha into every service's boot log via `packages/go-common/buildinfo` + `server.Run`
+- [x] Document `JWT_SECRET`, `ADMIN_BOOTSTRAP_KEY`, and `DATABASE_URL` rotation runbooks in `deploy/fly/README.md`
+- [x] `make remote-smoke` exercises the live gateway end-to-end
 
 ### This month (engineering)
 

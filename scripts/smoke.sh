@@ -31,6 +31,11 @@ cd "$ROOT"
 
 DATABASE_URL="${DATABASE_URL:-postgres://naditos:naditos@localhost:5432/naditos?sslmode=disable}"
 JWT_SECRET="${JWT_SECRET:-smoke-secret-do-not-use-anywhere-else-smoke-secret-do-not-use}"
+# After auth started gating /v1/admin/users with ADMIN_BOOTSTRAP_KEY,
+# the bootstrap-users step below 401s without this header. Generate a
+# fresh key per smoke run; export so go-run-spawned services inherit it.
+ADMIN_BOOTSTRAP_KEY="${ADMIN_BOOTSTRAP_KEY:-smoke-bootstrap-$RANDOM-$RANDOM}"
+export ADMIN_BOOTSTRAP_KEY
 TENANT="${TENANT:-demo}"
 LOG_DIR="${LOG_DIR:-/tmp/naditos-smoke}"
 
@@ -38,6 +43,23 @@ mkdir -p "$LOG_DIR"
 
 PIDS=()
 cleanup() {
+  local rc=$?
+  # On failure dump the last 40 lines of every service's log so a CI
+  # operator who only sees the workflow output can still root-cause
+  # without re-running. Skip on clean exit so green runs stay quiet.
+  if [ "$rc" -ne 0 ]; then
+    echo
+    echo "═════════════════════════════════════════════════════════"
+    echo "  smoke failed (exit $rc) — dumping service logs"
+    echo "─────────────────────────────────────────────────────────"
+    for f in "$LOG_DIR"/*.log; do
+      [ -f "$f" ] || continue
+      echo
+      echo "── $(basename "$f" .log) ──"
+      tail -40 "$f"
+    done
+    echo "═════════════════════════════════════════════════════════"
+  fi
   echo "→ stopping services"
   for pid in "${PIDS[@]:-}"; do
     [ -z "$pid" ] && continue
@@ -61,6 +83,25 @@ echo "→ apply migrations"
 DATABASE_URL="$DATABASE_URL" "$ROOT/scripts/migrate.sh" up >"$LOG_DIR/migrate.log" 2>&1
 
 # ─── 2. start services ──────────────────────────────────────────────────
+#
+# CI's 7GB runner can't host 9 concurrent `go run` invocations during
+# initial module download + compile — peak memory routinely OOM-kills
+# one of the children, which surfaces as a bash "Killed" line and the
+# smoke fails before health-check time. Pre-build sequentially so the
+# heavy memory cost is paid once per service in series; the resulting
+# binaries are tiny at runtime.
+echo "→ pre-building service binaries"
+BIN_DIR="$LOG_DIR/bin"
+mkdir -p "$BIN_DIR"
+for pair in audit:audit auth:auth registry:registry license:license \
+            insurance:insurance inspection:inspection fines:fines \
+            anpr-gateway:anpr-gateway notifications:notifications; do
+  name=${pair%%:*}
+  echo "  ↳ $name"
+  (cd "services/$name" && go build -trimpath -o "$BIN_DIR/$name" ./cmd/server) \
+    || { echo "✗ build failed for $name"; exit 1; }
+done
+
 start() {
   local name=$1 port=$2 dir=$3
   echo "→ starting $name on $port"
@@ -71,7 +112,7 @@ start() {
     SERVICE_PORT="$port" \
     AUDIT_URL="http://localhost:8007" \
     LOG_LEVEL="${LOG_LEVEL:-info}" \
-    go run ./cmd/server >"$LOG_DIR/$name.log" 2>&1
+    "$BIN_DIR/$name" >"$LOG_DIR/$name.log" 2>&1
   ) &
   PIDS+=("$!")
 }
@@ -113,14 +154,17 @@ wait_health 8009 notifications
 
 H_TENANT=(-H "X-Tenant-Id: $TENANT")
 H_JSON=(-H "Content-Type: application/json")
+# Auth gates /v1/admin/users on this header. Reuse it for every
+# bootstrap call below.
+H_BOOTSTRAP=(-H "X-Admin-Bootstrap-Key: $ADMIN_BOOTSTRAP_KEY")
 
 # ─── 3. bootstrap users ─────────────────────────────────────────────────
 echo "→ bootstrap admin + officer + citizen"
-curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" \
+curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" "${H_BOOTSTRAP[@]}" \
   -d '{"email":"admin@demo","password":"demo1234","full_name":"Demo admin","roles":["admin"]}' >/dev/null
-curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" \
+curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" "${H_BOOTSTRAP[@]}" \
   -d '{"email":"officer@demo","password":"demo1234","full_name":"Demo officer","roles":["officer"]}' >/dev/null
-curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" \
+curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" "${H_BOOTSTRAP[@]}" \
   -d '{"email":"citizen@demo","password":"demo1234","full_name":"Demo citizen","roles":["citizen"]}' >/dev/null
 
 login() {
@@ -141,7 +185,7 @@ echo "  ✓ officer + admin + citizen tokens obtained"
 
 # ─── 4. register a non-compliant vehicle ────────────────────────────────
 echo "→ register vehicle with expired insurance"
-PLATE="SMK-$(date +%s)"
+PLATE="SMK-$RANDOM"
 VEH=$(curl -sS -X POST http://localhost:8002/v1/vehicles "${H_TENANT[@]}" "${H_JSON[@]}" \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d "{\"plate\":\"$PLATE\",\"make\":\"Demo\",\"model\":\"X\",\"year\":2020,
@@ -209,7 +253,7 @@ done
 # consumer to materialize an audit_alerts row. Hardens the chain
 # anpr.alert event → event_outbox → consumer → audit_alerts → /audit UI.
 echo "→ ANPR alert: seed a stolen vehicle and scan its plate"
-ALERT_PLATE="STOLEN-$(date +%s)"
+ALERT_PLATE="STN-$RANDOM"
 PGPASSWORD=naditos psql -h localhost -U naditos -d naditos >/dev/null 2>&1 -c \
   "INSERT INTO vehicles (tenant_id, plate, is_stolen)
         VALUES ('$TENANT', '$ALERT_PLATE', true);"
@@ -481,7 +525,7 @@ echo "  ✓ license.reinstated delivered"
 # notifications consumer + the buyer-side render all work together.
 echo "→ transfer: provision buyer user"
 BUYER_EMAIL="buyer-$(date +%s)@demo"
-curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" \
+curl -sS -X POST http://localhost:8001/v1/admin/users "${H_TENANT[@]}" "${H_JSON[@]}" "${H_BOOTSTRAP[@]}" \
   -d "{\"email\":\"$BUYER_EMAIL\",\"password\":\"demo1234\",
        \"full_name\":\"Demo buyer\",\"roles\":[\"citizen\"]}" >/dev/null
 

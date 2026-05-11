@@ -284,3 +284,138 @@ curl -sS -H "Authorization: Bearer $TOK" -H "X-Tenant-Id: $TENANT" \
      "$API/v1/vehicles/by-plate/STOLEN-1" | jq .
 # Expect: JSON with "plate":"STOLEN-1","is_stolen":true,"status":"black"
 ```
+
+## Confirming a deploy is actually running the latest code
+
+`server.Run` (called by every backend service on boot) emits a structured
+log line with the git SHA the binary was built from:
+
+```json
+{"level":"INFO","msg":"boot","service":"auth",
+ "git_sha":"ee829f8a","git_sha_full":"ee829f8a9a5a8a...","git_modified":false,...}
+```
+
+To confirm an `fly deploy` actually pushed the new image:
+
+```bash
+EXPECTED=$(git rev-parse --short=8 HEAD)
+ACTUAL=$(fly logs -a naditos-auth --no-tail | grep '"msg":"boot"' \
+          | tail -1 | jq -r .git_sha)
+echo "expected $EXPECTED   actual $ACTUAL"
+test "$EXPECTED" = "$ACTUAL" && echo OK || echo "STALE — re-deploy with --no-cache"
+```
+
+If `git_modified: true` shows up in production, someone built and shipped
+from a dirty checkout. The SHA in `git_sha` does not fully describe what's
+running. Treat that as an incident: rebuild from a clean checkout.
+
+## Secret rotation runbooks
+
+The platform uses three shared secrets across the backend services. Each
+needs a different rotation procedure.
+
+### `JWT_SECRET` rotation
+
+The signing key for every access and refresh token. **Every backend
+service must agree on the value** or tokens issued by `auth` won't
+verify at the gateway, registry, etc.
+
+**When**: on suspected compromise, when an engineer who had access leaves,
+and as scheduled hygiene every 90 days. **Cost**: every active session
+becomes invalid; all users must re-login.
+
+```bash
+# 1. Generate a fresh secret (32 random bytes, hex-encoded)
+NEW_JWT=$(openssl rand -hex 32)
+
+# 2. Stage on every backend service simultaneously. --stage means the
+#    secret is queued but no machine restarts yet, so the rollout can
+#    happen as a single atomic-ish flip across services.
+for app in naditos-auth naditos-registry naditos-license naditos-insurance \
+           naditos-inspection naditos-fines naditos-audit \
+           naditos-anpr-gateway naditos-notifications naditos-gateway; do
+  fly secrets set --stage -a "$app" JWT_SECRET="$NEW_JWT"
+done
+
+# 3. Deploy the staged secrets in a tight loop. Order: backend first,
+#    gateway last — so a transient mismatch hits internal calls (which
+#    can retry) rather than client-facing requests.
+for app in naditos-auth naditos-registry naditos-license naditos-insurance \
+           naditos-inspection naditos-fines naditos-audit \
+           naditos-anpr-gateway naditos-notifications; do
+  fly secrets deploy -a "$app"
+done
+fly secrets deploy -a naditos-gateway
+
+# 4. Verify with a fresh login
+curl -sS -X POST https://naditos-gateway.fly.dev/v1/auth/login \
+  -H 'Content-Type: application/json' -H 'X-Tenant-Id: demo' \
+  -d '{"email":"officer@demo","password":"demo1234"}' | jq -r '.access_token | length'
+# Expect a non-zero number (the new token length).
+
+# 5. Communicate the rotation. All in-flight sessions are invalid; the
+#    next request from any logged-in user will get a 401 with
+#    code=unauthorized and they'll be redirected to login.
+```
+
+In a sovereign deployment, the staged → deploy step happens via the secret
+manager's audit-logged path, not Fly secrets. Fly is the transitional shape.
+
+### `ADMIN_BOOTSTRAP_KEY` lifecycle
+
+The shared secret that the gateway and the auth service both check for
+`POST /v1/admin/users` when no admin JWT is available yet. Used **once**,
+on first deploy, to bootstrap the first admin. After that, all
+admin-creation goes through admin JWTs and the bootstrap key should be
+rotated to empty.
+
+| When | What |
+|---|---|
+| First deploy | Generate; set on auth + gateway via `fly secrets set` |
+| `scripts/seed.sh` runs once successfully | First admin exists; you can rotate now |
+| **Rotate to empty** as soon as practical | `fly secrets unset -a naditos-auth ADMIN_BOOTSTRAP_KEY && fly secrets unset -a naditos-gateway ADMIN_BOOTSTRAP_KEY` |
+
+The auth handler closes the bootstrap path entirely if the env var is
+empty (`services/auth/internal/api/api.go:adminAuthorized`). After that,
+admin user creation requires an admin JWT — which means somebody who
+already has admin role makes the request from the admin UI.
+
+If you need to add a new admin from scratch later (e.g. all admins
+locked out): generate a new `ADMIN_BOOTSTRAP_KEY`, repeat the seeding
+flow, then rotate it back to empty.
+
+### `DATABASE_URL` rotation
+
+The Postgres connection string includes the password. Rotate by:
+
+1. `fly postgres detach naditos-pg --app <service>` (drops the per-app
+   role + secret).
+2. `fly postgres attach naditos-pg --app <service> --database-user
+   <new-name>` (creates a fresh role with a new password and writes the
+   new secret).
+3. Re-run for every service that needs DB access (everyone except gateway).
+
+**Caveat**: the consolidation work earlier in this project moved every
+service to the shared `naditos` database under `naditos_admin`. If you
+rotate by re-attaching, you'll get one fresh per-service role per
+service — undoing the consolidation. Until we automate the shared-DB
+rotation, the right approach is:
+
+```sql
+-- in psql as postgres superuser
+ALTER ROLE naditos_admin PASSWORD 'new-strong-password';
+```
+
+Then update `DATABASE_URL` on every service:
+
+```bash
+NEW_URL='postgres://naditos_admin:new-strong-password@naditos-pg.flycast:5432/naditos?sslmode=disable'
+for app in naditos-auth naditos-registry naditos-license naditos-insurance \
+           naditos-inspection naditos-fines naditos-audit \
+           naditos-anpr-gateway naditos-notifications; do
+  fly secrets set -a "$app" DATABASE_URL="$NEW_URL"
+done
+```
+
+Each `fly secrets set` triggers a rolling restart on the target service.
+A full rotation across 9 services takes ~2 minutes wall clock.
