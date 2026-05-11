@@ -8,6 +8,94 @@
 > capture, advanced enhancement, high-FPS on-device inference). Both
 > sources flow into the same evidence chain and the same ANPR backend.
 
+## 0. Known broken substrate (verified on main, commit 8491a4a)
+
+Before any new camera work begins we must acknowledge what is **not**
+currently true about the police-pwa, because both Pass-1 and the brief's
+"evidence-grade capture" claim are inconsistent with code reality.
+
+### 0.1 No offline behaviour exists
+
+Verified by static inspection of `apps/police-pwa/` and the whole
+workspace:
+
+- `apps/police-pwa/package.json` has no `next-pwa`, `serwist`,
+  `workbox`, or any PWA library.
+- `apps/police-pwa/next.config.mjs` has no service-worker plugin.
+- `apps/police-pwa/public/` ships only `manifest.webmanifest` — no
+  `sw.js`, no `sw.ts`. The app is *installable* but does not have a
+  service worker.
+- Zero hits across the workspace for `serviceWorker`, `workbox`,
+  `indexedDB`, `idb`, encrypted-local-storage patterns, or AES-GCM
+  key derivation.
+- `app/(app)/scan/page.tsx`: "Camera offline" is a static label
+  rendered when the local `scanning` state is `false`. There is no
+  `navigator.onLine` listener anywhere.
+- `app/(app)/fine/page.tsx`: fine submission is a plain `fetch`. On
+  network failure it sets an error string. No draft persistence,
+  no retry, no queue. Refreshing the tab loses the draft.
+
+Pass-1's claim of a "14-day encrypted IndexedDB cache + offline draft
+queue + AES-GCM device key" is unsupported by the code. Pass-2's
+"MISSING" was correct. Offline-first is **net-new build** in Phase C1.
+
+### 0.2 Photo evidence is never actually uploaded
+
+The bigger finding, and arguably an existing court-admissibility hole:
+
+In `apps/police-pwa/app/(app)/fine/page.tsx`:
+1. The photo file is read into an `ArrayBuffer`.
+2. SHA-256 is computed in-browser with `crypto.subtle.digest`.
+3. A **synthetic** `s3_key` string is constructed locally:
+   `` `evidence/${tenant}/${Date.now()}-${photoSha.slice(0,8)}.jpg` ``.
+4. The fine is POSTed with `evidence: [{ kind, s3_key, sha256, bytes,
+   taken_at }]`.
+5. **The photo bytes are never sent anywhere.** They die with the
+   browser tab.
+
+Server-side cross-check:
+
+- `packages/go-common/contracts/storage/storage.go` defines a clean
+  `Store` interface with `PresignPut`, `Put`, `Get`, `Delete`.
+- The **only** consumer of `storage.Store` is
+  `services/fines/internal/reaper/` (the retention reaper that
+  deletes expired evidence).
+- Grep across all services finds **zero** references to `PresignPut`
+  outside the contract file.
+- No `POST /v1/evidence/presign`, no `/v1/uploads`, no S3 presigned-
+  URL retrieval endpoint exists on any service.
+
+Result: the server records a `fine_evidence` row pointing to an S3
+key that was never written. The SHA-256 in the row matches nothing
+because there is nothing to compare it against. The retention reaper
+later tries to delete a nonexistent object (DevStub returns "not
+found"). The hash chain proves the officer's device *computed* a
+given SHA-256 at a given time and place — it does **not** prove the
+photo exists.
+
+The "evidence-grade capture / court-admissible" claim therefore is
+**hollow on current main** until this is fixed. Every downstream
+capability that depends on the photo — court export, citizen appeal
+review, retention, forensic review — is built on a missing layer.
+
+### 0.3 Implication for sequencing
+
+Phase C1 (originally scoped as "offline substrate + presigned upload
++ custody emission") is now also the fix for an existing audit-chain
+hole, not just net-new feature work. **C1 should land before any
+perception/overlay/native-companion work** because everything else
+in this document assumes that "evidence captured" means "bytes are
+durably stored and verified server-side." Until that's true, the
+rest of the platform amplifies a hole rather than building on a
+foundation.
+
+The phased plan in §12 is updated accordingly: C0 explicitly includes
+a presigned-upload endpoint and a server-side SHA verify step, and
+C1's exit criteria require an end-to-end "issue a fine, kill the tab,
+prove the bytes are in storage and hash-match the row" test.
+
+---
+
 ## 1. Why this split
 
 A web PWA in a mobile browser has hard ceilings that a sovereign-grade
@@ -332,19 +420,33 @@ evidence path. `POST /v1/fines` continues to reference evidence by
 Sequencing aligns with the foundational substrate already in flight,
 so we don't fragment effort:
 
-**Phase C0 — Verification & substrate prep** (small)
-- Run the PWA, confirm current state of service-worker / IDB.
-- Reconcile Pass-1 vs Pass-2 finding.
+**Phase C0 — Verification & substrate prep** (small) — DONE for verification
+- ~~Run the PWA, confirm current state of service-worker / IDB.~~ ✅ done.
+- ~~Reconcile Pass-1 vs Pass-2 finding.~~ ✅ documented in §0.
 - Land migration adding `source`, `enhanced_of`, `version_kind`,
   `model_id`, `device_attestation` columns on `fine_evidence`.
 - Land `model_registry`, `model_runs`, `anpr_ingest_clients`.
 
-**Phase C1 — Evidence substrate** (medium)
-- `POST /v1/evidence` and `GET /v1/evidence/{id}` server endpoints.
-- Server-side SHA-256 verify + custody emission on every action.
+**Phase C1 — Evidence substrate** (medium) — *blocks all other phases*
+- `POST /v1/evidence/presign` returns a short-lived presigned PUT URL
+  (issued by `fines` service or a dedicated `evidence` service —
+  decide during C1 design).
+- PWA performs the real PUT to S3/MinIO with the original bytes.
+- `POST /v1/evidence` registers the manifest (officer/device/geo/
+  taken_at/sha256/s3_key) **only after** the PUT confirms; server
+  fetches the object's HEAD, recomputes/verifies the SHA-256, and
+  rejects on mismatch.
+- `GET /v1/evidence/{id}` returns metadata + signed download URLs.
+- Custody event emitted on every action (`captured`, `uploaded`,
+  `verified`, `viewed`, `exported`, `sealed`, `enhanced`).
 - Offline queue + encrypted IDB in PWA, with the explicit state
   machine in §4.
 - Queue inspector UI.
+- **Exit criterion (must pass):** end-to-end test that (i) issues a
+  fine, (ii) kills the browser tab mid-flow, (iii) on next session
+  the bytes are durably in storage and the server-recomputed
+  SHA-256 matches the `fine_evidence` row; (iv) the same test
+  succeeds when the device starts offline and reconnects later.
 
 **Phase C2 — Hotlist overlay** (small-medium)
 - Tactical overlay component reading `GET /v1/vehicles/by-plate/{plate}`.
