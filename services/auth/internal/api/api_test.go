@@ -20,9 +20,11 @@ func discardLogger() *slog.Logger {
 
 // build wires the auth API against the test environment. Auth runs
 // across all tenants (login establishes one), so it uses the admin
-// pool — same as the runtime configuration.
+// pool — same as the runtime configuration. The audit client is nil
+// here; api.New treats a nil client as a no-op emitter, so tests don't
+// need a stub audit service.
 func build(env *testkit.Env) http.Handler {
-	return api.New(env.Cfg, discardLogger(), env.AdminPool())
+	return api.New(env.Cfg, discardLogger(), env.AdminPool(), nil)
 }
 
 // seedUser creates a user via /v1/admin/users so we get the same

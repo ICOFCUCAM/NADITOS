@@ -66,6 +66,30 @@ func (c *Client) Emit(ctx context.Context, action, resourceType, resourceID stri
 		ev.ActorRole = cl.Role
 		ev.ActorDevice = cl.DeviceID
 	}
+	return c.send(ctx, ev)
+}
+
+// EmitEvent posts an explicitly-constructed event. Use this when the request
+// does not yet have JWT claims in context (e.g. the auth service emitting
+// audit events for login attempts — the JWT is being issued *as a result*
+// of the call, so claims are not yet on the context).
+//
+// The caller is responsible for setting TenantID, ActorUser, ActorIP, etc.
+// OccurredAt and Service are filled in if zero.
+func (c *Client) EmitEvent(ctx context.Context, ev Event) error {
+	if c == nil || c.BaseURL == "" {
+		return nil
+	}
+	if ev.OccurredAt.IsZero() {
+		ev.OccurredAt = time.Now().UTC()
+	}
+	if ev.Service == "" {
+		ev.Service = c.Service
+	}
+	return c.send(ctx, ev)
+}
+
+func (c *Client) send(ctx context.Context, ev Event) error {
 	body, err := json.Marshal(ev)
 	if err != nil {
 		return err

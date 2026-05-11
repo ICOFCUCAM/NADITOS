@@ -5,14 +5,17 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/icofcucam/naditos/packages/go-common/audit"
 	"github.com/icofcucam/naditos/packages/go-common/auth"
 	"github.com/icofcucam/naditos/packages/go-common/config"
 	"github.com/icofcucam/naditos/packages/go-common/httpx"
@@ -24,14 +27,16 @@ type API struct {
 	log    *slog.Logger
 	pool   *pgxpool.Pool
 	issuer *auth.Issuer
+	audit  *audit.Client
 }
 
-func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool) http.Handler {
+func New(cfg config.Service, log *slog.Logger, pool *pgxpool.Pool, auditCl *audit.Client) http.Handler {
 	a := &API{
 		cfg:    cfg,
 		log:    log,
 		pool:   pool,
 		issuer: auth.NewIssuer(cfg.JWTSecret, cfg.AccessTTL, cfg.RefreshTTL),
+		audit:  auditCl,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/auth/login",   a.handleLogin)
@@ -136,6 +141,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		lg.Info("login: user not found")
+		a.emitLoginFailure(ctx, tenant, "", req.Email, "user_not_found", r)
 		httpx.WriteErr(w, httpx.ErrUnauthorized)
 		return
 	case err != nil:
@@ -144,6 +150,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	case !isActive:
 		lg.Info("login: user inactive", slog.String("user_id", userID.String()))
+		a.emitLoginFailure(ctx, tenant, userID.String(), req.Email, "user_inactive", r)
 		httpx.WriteErr(w, httpx.ErrUnauthorized)
 		return
 	}
@@ -152,6 +159,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if err := auth.CheckPassword(passwordHash, req.Password); err != nil {
 		lg.Info("login: password mismatch", slog.String("err", err.Error()))
+		a.emitLoginFailure(ctx, tenant, userID.String(), req.Email, "bad_password", r)
 		httpx.WriteErr(w, httpx.ErrUnauthorized)
 		return
 	}
@@ -192,6 +200,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lg.Info("login: success")
+	a.emitLoginSuccess(ctx, tenant, userID.String(), req.Email, role, r)
 
 	tcfg, err := a.loadTenantConfig(ctx, tenant)
 	if err != nil {
@@ -561,6 +570,85 @@ func loadRoleAndPerms(ctx context.Context, conn Querier, tenant string, userID u
 		perms = append(perms, p)
 	}
 	return primary, perms, nil
+}
+
+// emitLoginFailure records a failed login attempt to the audit chain.
+// userID is empty when the user could not be identified (wrong email).
+// The audit emission is fire-and-forget — failures are logged but never
+// propagate to the response.
+func (a *API) emitLoginFailure(ctx context.Context, tenant, userID, email, reason string, r *http.Request) {
+	if a.audit == nil {
+		return
+	}
+	if err := a.audit.EmitEvent(ctx, audit.Event{
+		TenantID:     tenant,
+		ActorUser:    userID,
+		Service:      "auth",
+		Action:       "auth.login.failed",
+		ResourceType: "session",
+		ResourceID:   "",
+		ActorIP:      clientIP(r),
+		After: map[string]any{
+			"email":      email,
+			"reason":     reason,
+			"user_agent": r.UserAgent(),
+		},
+	}); err != nil {
+		a.log.Warn("audit emit (login.failed) failed",
+			slog.String("err", err.Error()),
+			slog.String("reason", reason))
+	}
+}
+
+// emitLoginSuccess records a successful login to the audit chain.
+// Same fire-and-forget contract as emitLoginFailure.
+func (a *API) emitLoginSuccess(ctx context.Context, tenant, userID, email, role string, r *http.Request) {
+	if a.audit == nil {
+		return
+	}
+	if err := a.audit.EmitEvent(ctx, audit.Event{
+		TenantID:     tenant,
+		ActorUser:    userID,
+		ActorRole:    role,
+		Service:      "auth",
+		Action:       "auth.login.success",
+		ResourceType: "session",
+		ResourceID:   userID,
+		ActorIP:      clientIP(r),
+		After: map[string]any{
+			"email":      email,
+			"user_agent": r.UserAgent(),
+		},
+	}); err != nil {
+		a.log.Warn("audit emit (login.success) failed",
+			slog.String("err", err.Error()))
+	}
+}
+
+// clientIP extracts a best-effort client IP from the request. Behind a
+// reverse proxy / load balancer (Fly's fly-edge, an nginx ingress, etc.),
+// r.RemoteAddr is the proxy — the original client lives in X-Forwarded-For
+// or X-Real-IP. We prefer the leftmost X-Forwarded-For entry (the original
+// client), fall back to X-Real-IP, then to the connection peer.
+//
+// Forwarded headers can be spoofed by anything between the client and our
+// trust boundary, so callers should treat this as "best effort for audit
+// trails", not as an authentication signal.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.Index(xff, ","); i > 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if xr := r.Header.Get("X-Real-Ip"); xr != "" {
+		return strings.TrimSpace(xr)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 type loggerCtxKey struct{}
